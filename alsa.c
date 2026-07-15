@@ -145,11 +145,20 @@ static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
         }
     }
 
-    /* Use the smallest period size for a latency-sensitive
-     * application that is the primary one on the system */
+    /* Pi DVS note: tried forcing a larger period (32 samples instead
+     * of the hardware's reported minimum of 8) on the theory that 8
+     * was too tight for the scheduling stack to service reliably.
+     * Measured on real hardware: this made xruns dramatically worse
+     * (469 in ~6s vs ~11-24 with the original period=8), the opposite
+     * of the prediction. Reverted - period_size_first() empirically
+     * performs better on this hardware, for a reason not yet
+     * understood. Left as a note rather than silently discarded,
+     * since the reasoning that led here still seems sound and the
+     * result contradicts it - worth real investigation later rather
+     * than trusting either intuition over the other. */
 
     r = snd_pcm_hw_params_set_period_size_first(pcm, hw, &frames, &dir);
-    CHECK("hw_params_set_buffer_time_near", r);
+    CHECK("hw_params_set_period_size_first", r);
 
     r = snd_pcm_hw_params(pcm, hw);
     CHECK("hw_params", r);
@@ -166,8 +175,10 @@ static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
 
 static bool set_sw(snd_pcm_t *pcm)
 {
-    int r;
+    int r, dir;
     snd_pcm_sw_params_t *sw;
+    snd_pcm_hw_params_t *hw;
+    snd_pcm_uframes_t avail_min;
 
     snd_pcm_sw_params_alloca(&sw);
 
@@ -187,7 +198,26 @@ static bool set_sw(snd_pcm_t *pcm)
     r = snd_pcm_sw_params_set_start_threshold(pcm, sw, LONG_MAX);
     CHECK("sw_params_set_start_threshold", r);
 
-    r = snd_pcm_sw_params_set_avail_min(pcm, sw, 1);
+    /* Pi DVS fix: upstream used avail_min=1, waking the application
+     * the instant even a single frame of space is free - the most
+     * aggressive setting possible, leaving zero margin for any
+     * scheduling variance at all. Found on real hardware, alongside
+     * the period_size issue above: this Pi5 + HiFiBerry DAC8x
+     * combination produced frequent, clustered playback xruns with
+     * avail_min=1, audible as regular dropouts even after fixing
+     * period size and ruling out CPU/thermal/governor/IRQ causes.
+     * Use the actual negotiated period size instead - the kernel
+     * batches a full period's worth of work per wake-up rather than
+     * firing on every single available frame. Falls back to 1 (the
+     * original behaviour) if the period size can't be read, rather
+     * than silently using an uninitialised value. */
+
+    snd_pcm_hw_params_alloca(&hw);
+    avail_min = 1;
+    if (snd_pcm_hw_params_current(pcm, hw) >= 0)
+        snd_pcm_hw_params_get_period_size(hw, &avail_min, &dir);
+
+    r = snd_pcm_sw_params_set_avail_min(pcm, sw, avail_min);
     CHECK("sw_params_set_avail_min", r);
 
     r = snd_pcm_sw_params(pcm, sw);
