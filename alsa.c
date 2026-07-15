@@ -327,13 +327,29 @@ static signed short *buffer(const snd_pcm_channel_area_t *area,
 static int playback(struct device *dv)
 {
     int r;
+    snd_pcm_sframes_t avail;
     snd_pcm_uframes_t frames, offset;
     const snd_pcm_channel_area_t *area;
     struct alsa *alsa = (struct alsa*)dv->local;
 
-    frames = snd_pcm_avail_update(alsa->playback.pcm);
-    if (frames < 0)
-        return (int)frames;
+    /* Pi DVS fix: snd_pcm_avail_update() returns a *signed* frame
+     * count, negative on error (eg. -EPIPE/-32 on an underrun). The
+     * original code assigned this directly into the *unsigned*
+     * `frames`, so a negative error code silently became a huge
+     * positive number and "if (frames < 0)" could never be true for
+     * an unsigned type - the error-handling code right there was
+     * unreachable. Found by actually running against real hardware:
+     * this HAT's timing produced an underrun almost immediately,
+     * which then went undetected forever, leaving playback stuck
+     * with a "successfully started" stream that never actually
+     * advanced again. Checking a properly signed variable first
+     * lets the existing xrun-recovery path in handle() work as
+     * originally intended. */
+
+    avail = snd_pcm_avail_update(alsa->playback.pcm);
+    if (avail < 0)
+        return (int)avail;
+    frames = (snd_pcm_uframes_t)avail;
 
     r = snd_pcm_mmap_begin(alsa->playback.pcm, &area, &offset, &frames);
     if (r < 0)
@@ -369,13 +385,19 @@ static int playback(struct device *dv)
 static int capture(struct device *dv)
 {
     int r;
+    snd_pcm_sframes_t avail;
     snd_pcm_uframes_t frames, offset;
     const snd_pcm_channel_area_t *area;
     struct alsa *alsa = (struct alsa*)dv->local;
 
-    frames = snd_pcm_avail(alsa->capture.pcm);
-    if (frames < 0)
-        return (int)frames;
+    /* Pi DVS fix: same signed/unsigned bug as playback() above - see
+     * the comment there. Hasn't been observed to bite here yet, but
+     * it's the identical latent bug, fixed for the same reason. */
+
+    avail = snd_pcm_avail(alsa->capture.pcm);
+    if (avail < 0)
+        return (int)avail;
+    frames = (snd_pcm_uframes_t)avail;
 
     r = snd_pcm_mmap_begin(alsa->capture.pcm, &area, &offset, &frames);
     if (r < 0)
