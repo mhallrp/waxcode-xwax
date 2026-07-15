@@ -570,8 +570,19 @@ int alsa_init(struct device *dv, const char *name,
     alsa->buffer = buffer;
     alsa->written = 0;
 
+    /* Pi DVS fix: upstream always opened capture with buffer=0
+     * ("device maximum"), ignoring --buffer entirely for this side -
+     * only playback ever got the requested size. On this hardware
+     * the resulting default capture buffer was large enough that the
+     * timecoder was working from stale data, causing it to lose
+     * bitstream lock for whole seconds at a time in a repeating
+     * cycle (audible as periodic screeching/dropout with a hard
+     * position correction at the end of each cycle). Giving capture
+     * the same explicit, small buffer as playback fixed it - found
+     * by testing this in isolation on real hardware, confirmed
+     * clean by ear at buffer=256. */
     if (flow_open(&alsa->capture, name, SND_PCM_STREAM_CAPTURE,
-                 rate, 0) < 0)
+                 rate, buffer) < 0)
     {
         fputs("Failed to open device for capture.\n", stderr);
         goto fail;
