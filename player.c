@@ -379,7 +379,18 @@ static int sync_to_timecode(struct player *pl)
 static void calibrate_to_timecode_position(struct player *pl)
 {
     assert(pl->target_position != TARGET_UNKNOWN);
-    pl->offset += pl->target_position - pl->position;
+
+    /* Pi DVS: deliberately do NOT adjust ->offset here. Upstream
+     * xwax shifts it to make wherever the needle happens to be at
+     * first lock into "track position 0" - a silent auto-recue to
+     * "now" rather than to the record's real, fixed start. offset
+     * must stay at its initialised value (0) forever, so that
+     * (position - offset) always equals the true, absolute,
+     * decoded timecode position - vinyl position 0 is always track
+     * position 0, on every copy, permanently (see CLAUDE.md's
+     * "Needle position" section). The position snap below is still
+     * correct and wanted: it's an instant, accurate jump to the real
+     * position on first lock, not a gradual catch-up. */
     pl->position = pl->target_position;
 }
 
