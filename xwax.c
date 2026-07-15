@@ -26,6 +26,7 @@
 #include <sys/mman.h> /* mlockall() */
 
 #include "alsa.h"
+#include "control.h"
 #include "controller.h"
 #include "device.h"
 #include "dicer.h"
@@ -119,6 +120,9 @@ static void usage(FILE *fd)
     fprintf(fd, "JACK device options:\n"
       "  --jack <name>       Create a JACK deck with the given name\n\n");
 #endif
+
+    fprintf(fd, "Remote control (Pi DVS):\n"
+      "  --socket <path>     Unix socket for remote control (LOAD only, PoC)\n\n");
 
 #ifdef WITH_ALSA
     fprintf(fd, "MIDI control:\n"
@@ -604,6 +608,35 @@ int main(int argc, const char *argv[])
 
             if (library_import(&library, scanner, argv[1]) == -1)
                 return -1;
+
+            argv += 2;
+            argc -= 2;
+
+        } else if (!strcmp(argv[0], "--socket")) {
+
+            /* Pi DVS control socket - see control.h. Not gated behind
+             * WITH_ALSA, since a Unix socket needs no audio library
+             * at all - unlike --dicer below, which needs ALSA's
+             * rawmidi API. */
+
+            struct controller *c;
+
+            if (nctl == ARRAY_SIZE(ctl)) {
+                fprintf(stderr, "Too many controllers; aborting.\n");
+                return -1;
+            }
+
+            c = &ctl[nctl];
+
+            if (argc < 2) {
+                fprintf(stderr, "--socket requires a path as an argument.\n");
+                return -1;
+            }
+
+            if (control_init(c, &rt, argv[1]) == -1)
+                return -1;
+
+            nctl++;
 
             argv += 2;
             argc -= 2;
