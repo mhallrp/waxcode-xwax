@@ -46,7 +46,7 @@ static const struct record no_record = {
 
 int deck_init(struct deck *d, struct rt *rt,
               struct timecode_def *timecode, const char *importer,
-              double speed, bool phono, bool protect)
+              double speed, bool phono, bool protect, double cue_offset)
 {
     unsigned int rate;
 
@@ -62,7 +62,7 @@ int deck_init(struct deck *d, struct rt *rt,
     rate = device_sample_rate(&d->device);
     assert(timecode != NULL);
     timecoder_init(&d->timecoder, timecode, speed, rate, phono);
-    player_init(&d->player, rate, track_acquire_empty(), &d->timecoder);
+    player_init(&d->player, rate, track_acquire_empty(), &d->timecoder, cue_offset);
     cues_reset(&d->cues);
 
     /* The timecoder and player are driven by requests from

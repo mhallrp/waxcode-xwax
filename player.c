@@ -197,7 +197,8 @@ void player_set_timecoder(struct player *pl, struct timecoder *tc)
  */
 
 void player_init(struct player *pl, unsigned int sample_rate,
-                 struct track *track, struct timecoder *tc)
+                 struct track *track, struct timecoder *tc,
+                 double cue_offset)
 {
     assert(track != NULL);
     assert(sample_rate != 0);
@@ -209,7 +210,17 @@ void player_init(struct player *pl, unsigned int sample_rate,
     player_set_timecoder(pl, tc);
 
     pl->position = 0.0;
-    pl->offset = 0.0;
+    /* Pi DVS: cue_offset is a fixed, deliberately-configured
+     * calibration constant (see xwax.c's --cue-offset), not a dynamic
+     * recue - it compensates for a small, consistent discrepancy
+     * confirmed on real hardware between true needle-drop position 0
+     * and the first position xwax can actually decode (decoding a
+     * valid absolute position requires VALID_BITS consecutive correct
+     * bits - see timecoder.c - which inherently takes a small amount
+     * of groove/time to accumulate, during which the needle keeps
+     * moving). Defaults to 0.0 (no correction, matching prior
+     * behaviour) until empirically tuned. */
+    pl->offset = cue_offset;
     pl->target_position = TARGET_UNKNOWN;
     pl->last_difference = 0.0;
 
@@ -384,10 +395,12 @@ static void calibrate_to_timecode_position(struct player *pl)
      * xwax shifts it to make wherever the needle happens to be at
      * first lock into "track position 0" - a silent auto-recue to
      * "now" rather than to the record's real, fixed start. offset
-     * must stay at its initialised value (0) forever, so that
-     * (position - offset) always equals the true, absolute,
-     * decoded timecode position - vinyl position 0 is always track
-     * position 0, on every copy, permanently (see CLAUDE.md's
+     * must stay at its initialised value (0.0 by default, or a fixed
+     * --cue-offset calibration constant - see player_init()) forever,
+     * so that (position - offset) always equals the true, absolute,
+     * decoded timecode position, corrected by the same fixed constant
+     * every time - vinyl position 0 is always the same track
+     * position, on every copy, permanently (see CLAUDE.md's
      * "Needle position" section). The position snap below is still
      * correct and wanted: it's an instant, accurate jump to the real
      * position on first lock, not a gradual catch-up. */

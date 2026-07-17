@@ -37,7 +37,12 @@ struct player {
 
     double position, /* seconds */
         target_position, /* seconds, or TARGET_UNKNOWN */
-        offset, /* track start point in timecode */
+        offset, /* track start point in timecode - see player_init()'s
+                 * cue_offset parameter. Fixed for the life of the
+                 * player once set; never adjusted again after init (in
+                 * particular, calibrate_to_timecode_position() in
+                 * player.c deliberately does not touch it - see that
+                 * function's own comment) */
         last_difference, /* last known position minus target_position */
         pitch, /* from timecoder */
         sync_pitch, /* pitch required to sync to timecode signal */
@@ -51,7 +56,8 @@ struct player {
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
-                 struct track *track, struct timecoder *timecoder);
+                 struct track *track, struct timecoder *timecoder,
+                 double cue_offset);
 void player_clear(struct player *pl);
 
 void player_set_timecoder(struct player *pl, struct timecoder *tc);

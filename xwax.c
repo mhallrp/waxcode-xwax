@@ -70,6 +70,7 @@ static double speed;
 static bool protect, phono;
 static const char *importer;
 static struct timecode_def *timecode;
+static double cue_offset; /* Pi DVS: see --cue-offset and player.c's cue_offset param */
 
 static void usage(FILE *fd)
 {
@@ -90,6 +91,8 @@ static void usage(FILE *fd)
 
     fprintf(fd, "Deck options:\n"
       "  --timecode <name>   Timecode name\n"
+      "  --cue-offset <s>    Pi DVS: fixed calibration offset in seconds,\n"
+      "                      applied to every needle-drop position (default 0)\n"
       "  --33                Use timecode at 33.3RPM (default)\n"
       "  --45                Use timecode at 45RPM\n"
       "  --[no-]protect      Protect against certain operations while playing\n"
@@ -178,7 +181,7 @@ static int commit_deck(void)
 
     d = &deck[ndeck];
 
-    r = deck_init(d, &rt, timecode, importer, speed, phono, protect);
+    r = deck_init(d, &rt, timecode, importer, speed, phono, protect, cue_offset);
     if (r == -1)
         return -1;
 
@@ -249,6 +252,7 @@ int main(int argc, const char *argv[])
     speed = 1.0;
     protect = false;
     phono = false;
+    cue_offset = 0.0;
     use_mlock = false;
 
 #if defined WITH_OSS || WITH_ALSA
@@ -470,6 +474,29 @@ int main(int argc, const char *argv[])
             timecode = timecoder_find_definition(argv[1]);
             if (timecode == NULL) {
                 fprintf(stderr, "Timecode '%s' is not known.\n", argv[1]);
+                return -1;
+            }
+
+            argv += 2;
+            argc -= 2;
+
+        } else if (!strcmp(argv[0], "--cue-offset")) {
+
+            /* Pi DVS: fixed calibration constant, seconds - see
+             * player.c's cue_offset param. Must precede --alsa/--oss/
+             * --jack on the command line, same as --timecode/--buffer/
+             * --socket above - commit_deck() (called when the device
+             * flag is parsed) reads this global at that moment, not
+             * after all arguments finish parsing. */
+
+            if (argc < 2) {
+                fprintf(stderr, "%s requires a number of seconds as an argument.\n", argv[0]);
+                return -1;
+            }
+
+            cue_offset = strtod(argv[1], &endptr);
+            if (*endptr != '\0') {
+                fprintf(stderr, "%s requires a number of seconds as an argument.\n", argv[0]);
                 return -1;
             }
 
