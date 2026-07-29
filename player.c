@@ -224,6 +224,11 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->target_position = TARGET_UNKNOWN;
     pl->last_difference = 0.0;
 
+    /* Pi DVS: no real-time buffer has run yet, so there is genuinely
+     * no signal to speak of - false is the honest starting value, not
+     * just a placeholder (see struct player's own doc comment). */
+    pl->timecode_valid = false;
+
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
     pl->volume = 0.0;
@@ -318,6 +323,27 @@ void player_set_track(struct player *pl, struct track *track)
     spin_lock(&pl->lock); /* Synchronise with the playback thread */
     x = pl->track;
     pl->track = track;
+
+    /* Pi DVS (owner's call, 2026-07-29): if the needle isn't currently
+     * providing a valid timecode reading (lifted, or never dropped),
+     * `position` is just whatever was last measured for a PREVIOUS
+     * load - it has no relationship to this new one. Left alone, the
+     * new track would silently start playback wherever that stale
+     * reading happens to land, not at its own beginning - confirmed
+     * as a real, confusing thing on real hardware (lift the needle
+     * after playing a track, load a new one, it starts mid-track at
+     * the old track's last position). Resetting `position` to exactly
+     * `offset` makes player_get_elapsed() (position - offset) read 0,
+     * ie. "start of track" - not touching `offset` itself, which must
+     * stay the fixed calibration constant it's always been (see its
+     * own doc comment). The instant the needle DOES provide a real
+     * reading again, retarget()/sync_to_timecode() overwrite this
+     * immediately with the real absolute position, same as any other
+     * needle drop - this is only ever the starting value while
+     * genuinely nothing better is known. */
+    if (!pl->timecode_valid)
+        pl->position = pl->offset;
+
     spin_unlock(&pl->lock);
 
     track_release(x); /* discard the old track */
@@ -359,6 +385,15 @@ static int sync_to_timecode(struct player *pl)
     signed int timecode;
 
     timecode = timecoder_get_position(pl->timecoder, &when);
+
+    /* Pi DVS: the one place this gets set - see struct player's own
+     * doc comment. Deliberately BEFORE the safe-zone early return
+     * below, so a needle that's down but past the safe zone still
+     * correctly counts as "signal present" here (it's genuinely
+     * reading something, just not something sync_to_timecode() itself
+     * wants to act on) - distinct from timecode == -1, which means no
+     * reading at all. */
+    pl->timecode_valid = (timecode != -1);
 
     /* Instruct the caller to disconnect the timecoder if the needle
      * is outside the 'safe' zone of the record */

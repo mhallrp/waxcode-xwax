@@ -52,7 +52,20 @@ struct player {
 
     struct timecoder *timecoder;
     bool timecode_control,
-        recalibrate; /* re-sync offset at next opportunity */
+        recalibrate, /* re-sync offset at next opportunity */
+        /* Pi DVS: whether the timecoder currently has a genuinely
+         * valid, locked absolute position (needle down and reading,
+         * see timecoder_get_position()'s -1 sentinel) - NOT the same
+         * thing as `pitch` being near zero, which is also true for a
+         * needle resting stationary on a still-valid position (paused,
+         * not lifted). Updated every real-time buffer inside
+         * sync_to_timecode(), read (lock-free, same established
+         * pattern as `pitch` elsewhere - see control.c's STATUS reply)
+         * by player_set_track() on the LOAD worker thread to decide
+         * whether a fresh load should start at track position 0
+         * rather than silently inheriting wherever the timecode
+         * happened to leave off from whatever was loaded before. */
+        timecode_valid;
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,

@@ -59,6 +59,7 @@ void deck_clear(struct deck *deck);
 bool deck_is_locked(const struct deck *deck);
 
 void deck_load(struct deck *deck, struct record *record);
+void deck_unload(struct deck *deck);
 
 void deck_recue(struct deck *deck);
 void deck_clone(struct deck *deck, const struct deck *from);

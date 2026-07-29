@@ -77,6 +77,7 @@ struct control {
     pthread_mutex_t lock;
     pthread_cond_t cond;
     char *pending_path; /* NULL if nothing pending */
+    bool pending_unload;
     bool shutdown;
 };
 
@@ -123,13 +124,28 @@ static void do_load(struct control *ctrl, char *path)
     deck_load(ctrl->deck, re);
 }
 
+/*
+ * Same worker-thread requirement as do_load() above - deck_unload()
+ * ends up calling track_release() on whatever track was previously
+ * loaded, which calls free() once its refcount reaches zero. free()
+ * is just as unsafe on the realtime thread as the malloc() in
+ * do_load() is (see IMPORTANT #2), so this can't be handled directly
+ * from realtime() either, even though - unlike LOAD - it doesn't look
+ * like it should need it at first glance.
+ */
+static void do_unload(struct control *ctrl)
+{
+    fprintf(stderr, "control: UNLOAD\n");
+    deck_unload(ctrl->deck);
+}
+
 static void *worker_main(void *arg)
 {
     struct control *ctrl = arg;
 
     pthread_mutex_lock(&ctrl->lock);
     for (;;) {
-        while (ctrl->pending_path == NULL && !ctrl->shutdown)
+        while (ctrl->pending_path == NULL && !ctrl->pending_unload && !ctrl->shutdown)
             pthread_cond_wait(&ctrl->cond, &ctrl->lock);
 
         if (ctrl->shutdown) {
@@ -137,11 +153,18 @@ static void *worker_main(void *arg)
             return NULL;
         }
 
-        char *path = ctrl->pending_path;
-        ctrl->pending_path = NULL;
-        pthread_mutex_unlock(&ctrl->lock);
+        if (ctrl->pending_path != NULL) {
+            char *path = ctrl->pending_path;
+            ctrl->pending_path = NULL;
+            pthread_mutex_unlock(&ctrl->lock);
 
-        do_load(ctrl, path); /* takes ownership of path, do not free here */
+            do_load(ctrl, path); /* takes ownership of path, do not free here */
+        } else {
+            ctrl->pending_unload = false;
+            pthread_mutex_unlock(&ctrl->lock);
+
+            do_unload(ctrl);
+        }
 
         pthread_mutex_lock(&ctrl->lock);
     }
@@ -179,10 +202,143 @@ static void handle_load(struct control *ctrl, const char *path)
     pthread_mutex_unlock(&ctrl->lock);
 }
 
+/*
+ * Runs on the realtime thread (called from realtime(), below) - same
+ * constraints as handle_load() above, and for the same reason: see
+ * do_unload()'s doc comment for why UNLOAD needs the worker thread
+ * hand-off too, even though it has no path argument to copy.
+ */
+static void handle_unload(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: UNLOAD received before a deck was assigned\n");
+        return;
+    }
+
+    pthread_mutex_lock(&ctrl->lock);
+    if (ctrl->pending_path != NULL || ctrl->pending_unload) {
+        fprintf(stderr, "control: dropping UNLOAD, previous request still pending\n");
+    } else {
+        ctrl->pending_unload = true;
+        pthread_cond_signal(&ctrl->cond);
+    }
+    pthread_mutex_unlock(&ctrl->lock);
+}
+
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same constraints as handle_load() above. Unlike
+ * LOAD, this reads state and replies synchronously rather than
+ * handing off to the worker thread: player_get_remain()/
+ * player_is_active() are plain field reads (see player.c), not one
+ * of xwax's guarded, non-realtime-safe functions like deck_load() -
+ * confirmed by xwax's own stock SDL interface (interface.c) calling
+ * these same two functions directly from its UI thread with no lock,
+ * which this follows.
+ *
+ * ctrl->deck->record is &no_record (deck.c, not exposed outside it)
+ * until a real LOAD succeeds - checking ->pathname != NULL rather
+ * than importing that static is enough to tell "nothing loaded yet"
+ * apart from a real track, since no_record leaves pathname at its
+ * zero-initialised NULL.
+ */
+static void handle_status(struct control *ctrl)
+{
+    /* Sized for a real filesystem path, not just the fixed-format
+     * state/remain fields - PATH_MAX on Linux is 4096, plus room for
+     * "STATUS PLAYING 12345.6 " and the trailing newline. */
+    char reply[4200];
+    const char *state;
+    double remain;
+    int n;
+
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: STATUS received before a deck was assigned\n");
+        return;
+    }
+
+    if (ctrl->deck->record->pathname == NULL) {
+        /* No path field at all when nothing's loaded - there's nothing
+         * meaningful to report, and it keeps this, the common idle
+         * case, a fixed, simple shape. pitch is meaningless here too -
+         * fixed 0.000, same reasoning as remain below. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000\n");
+    } else if (track_is_importing(ctrl->deck->player.track)) {
+        /* A LOAD was issued, but xwax's own import subprocess (see
+         * track.c) is still decoding the file - track->length only
+         * reflects however much has been decoded SO FAR, not the
+         * eventual full duration, so player_get_remain() would report
+         * a real but meaningless, steadily-growing number here.
+         * Confirmed as a real, confusing thing to show on real
+         * hardware: the app's countdown would start at some small,
+         * wrong value and visibly "snap" to the correct one once
+         * import finished, for every single load, with no needle
+         * involved at all - purely an import-progress artifact, not
+         * anything to do with timecode. Reporting a distinct state
+         * instead lets a client show "loading" honestly rather than a
+         * number it can't yet trust. remain/pitch are meaningless
+         * here, sent as fixed 0.0/0.000 for a consistent reply shape;
+         * path is still included so a client already knows which file
+         * this is.
+         */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %s\n", ctrl->deck->record->pathname);
+    } else {
+        remain = player_get_remain(&ctrl->deck->player);
+        if (remain < 0.0)
+            remain = 0.0;
+        state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
+        /* The path is what lets a client (Node, then the app) recover
+         * "what's actually loaded on this deck" after ITS OWN restart
+         * - xwax is the one component that keeps running (and keeps
+         * the real answer) through a Node or app restart, so it's the
+         * only place this can authoritatively come from. Last field,
+         * unquoted - a path can contain spaces, but never a newline,
+         * so "everything to end of line" is an unambiguous way for a
+         * client to extract it without needing real escaping.
+         *
+         * pitch (added 2026-07-27): struct player's own field, read
+         * directly with no lock - exactly how player_is_active() just
+         * read it one line above to decide `state`. Lets a client
+         * interpolate position accurately between polls (real speed
+         * and direction, not an assumed steady 1x forward guess).
+         *
+         * remain now %.4f, not the original %.1f (same day) - the
+         * underlying player_get_remain() was always a fully precise
+         * double; %.1f only ever rounded it for display, but a client
+         * re-anchoring its own pitch-based interpolation to this value
+         * on every poll (250ms) was inheriting that rounding as a real,
+         * visible position snap each time - up to ~50ms of error,
+         * corrected abruptly every tick. Confirmed as a real
+         * contributor to "not smooth" playback/scrub feel on real
+         * hardware, even with pitch-based interpolation already in
+         * place. */
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %s\n",
+                     state, remain, ctrl->deck->player.pitch, ctrl->deck->record->pathname);
+    }
+
+    if (n < 0 || (size_t)n >= sizeof reply) {
+        fprintf(stderr, "control: STATUS reply truncated\n");
+        return;
+    }
+
+    /* Non-blocking socket (see IMPORTANT #1), tiny fixed-size reply -
+     * a short write() rather than a buffered/retrying send loop, same
+     * complexity level as the rest of this proof-of-concept protocol.
+     * Node reconnects and asks again on its own polling interval (see
+     * deck-control.js), so a dropped reply here just costs one tick,
+     * not a stuck client. */
+    if (write(ctrl->client_fd, reply, (size_t)n) == -1)
+        perror("control: write STATUS reply");
+}
+
 static void handle_line(struct control *ctrl, char *line)
 {
     if (!strncmp(line, "LOAD ", 5)) {
         handle_load(ctrl, line + 5);
+    } else if (!strcmp(line, "UNLOAD")) {
+        handle_unload(ctrl);
+    } else if (!strcmp(line, "STATUS")) {
+        handle_status(ctrl);
     } else {
         fprintf(stderr, "control: unrecognised command '%s'\n", line);
     }
@@ -354,6 +510,7 @@ int control_init(struct controller *c, struct rt *rt, const char *path)
     ctrl->client_fd = -1;
     ctrl->fill = 0;
     ctrl->pending_path = NULL;
+    ctrl->pending_unload = false;
     ctrl->shutdown = false;
     strcpy(ctrl->sockpath, path);
     pthread_mutex_init(&ctrl->lock, NULL);

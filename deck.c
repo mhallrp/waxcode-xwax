@@ -108,6 +108,28 @@ void deck_load(struct deck *d, struct record *record)
     player_set_track(&d->player, t); /* passes reference */
 }
 
+/*
+ * Unload the current track from a deck, returning it to the same
+ * empty state deck_init() starts a deck in - see CLAUDE.md's
+ * "Passthrough" section: turning passthrough on needs xwax to stop
+ * driving its own decoded audio to the DAC first, since a real vinyl
+ * passthrough loop (alsaloop, managed by Node - see
+ * server/src/passthrough.js) and xwax's own playback can't both write
+ * to the same output at once. Mirrors deck_load()'s own locked-deck
+ * guard - refusing to unload out from under an active, protected deck
+ * for the same reason deck_load() refuses to load one.
+ */
+void deck_unload(struct deck *d)
+{
+    if (deck_is_locked(d)) {
+        status_printf(STATUS_WARN, "Stop deck to unload");
+        return;
+    }
+
+    d->record = &no_record;
+    player_set_track(&d->player, track_acquire_empty());
+}
+
 void deck_recue(struct deck *d)
 {
     if (deck_is_locked(d)) {

@@ -24,13 +24,60 @@ struct controller;
 struct rt;
 
 /*
- * A minimal Unix-socket controller for remote track loading - see
- * CLAUDE.md's "xwax fork" section. One socket = one deck (no <deck>
- * parameter in the protocol - the socket path itself identifies
- * which deck this is), matching "one xwax process per deck".
+ * A minimal Unix-socket controller for remote track loading and
+ * status queries - see CLAUDE.md's "xwax fork" section. One socket =
+ * one deck (no <deck> parameter in the protocol - the socket path
+ * itself identifies which deck this is), matching "one xwax process
+ * per deck".
  *
- * Proof-of-concept scope: LOAD <path> only, to validate real-time
- * tracking feel before building out PASSTHRU/STATUS.
+ * Commands, one per line:
+ *   LOAD <path>   - load a track from a bare filepath (see do_load())
+ *   UNLOAD        - clear the deck back to empty (see deck_unload(),
+ *                    do_unload()) - used to hand the DAC output over
+ *                    to a passthrough loop (alsaloop, managed by
+ *                    Node - see server/src/passthrough.js and
+ *                    CLAUDE.md's "Passthrough" section), since xwax's
+ *                    own playback and a real vinyl passthrough can't
+ *                    both drive the same output at once. No reply;
+ *                    a following STATUS will show EMPTY once it's
+ *                    taken effect.
+ *   STATUS        - reply with "STATUS EMPTY 0.0 0.000\n" if nothing's
+ *                    loaded, "STATUS IMPORTING 0.0 0.000 <path>\n" if a
+ *                    LOAD was issued but xwax's own import subprocess
+ *                    is still decoding it (see track_is_importing() -
+ *                    track->length only reflects however much has
+ *                    decoded SO FAR during this window, so remain
+ *                    would otherwise be a real but meaningless,
+ *                    steadily-growing number, confirmed as a real,
+ *                    confusing thing to show on real hardware), or
+ *                    "STATUS <PLAYING|STOPPED> <remain> <pitch> <path>\n"
+ *                    once import's done. <remain> is seconds left in
+ *                    the loaded track, clamped to >= 0. PLAYING/STOPPED
+ *                    reflects player_is_active() - whether the
+ *                    platter's currently spinning fast enough to be
+ *                    "on", not just whether a track is loaded. <pitch>
+ *                    is struct player's own `pitch` field (from the
+ *                    timecoder, updated every real-time audio buffer) -
+ *                    positive for forward, negative for reverse,
+ *                    magnitude is speed relative to normal (1.0 = real
+ *                    time, 0 = stationary) - added 2026-07-27 so a
+ *                    client can interpolate a scrub position accurately
+ *                    BETWEEN polls instead of assuming steady 1x
+ *                    forward motion; read the same lock-free way
+ *                    player_is_active() already reads it one line away,
+ *                    not a new access pattern. EMPTY/IMPORTING report a
+ *                    fixed 0.000 - meaningless in those states, kept
+ *                    only for a consistent field shape. <path> is the
+ *                    loaded file's path, unquoted and always the last
+ *                    field (may contain spaces, never a newline) - lets
+ *                    a client recover "what's actually loaded on this
+ *                    deck" after its OWN restart, since xwax is the one
+ *                    thing that keeps running (and keeps the real
+ *                    answer) through a Node or app restart.
+ *
+ * There's deliberately no PASSTHRU command here - passthrough is
+ * implemented outside xwax entirely (UNLOAD plus an external alsaloop
+ * process, see above), not as a mode xwax itself knows about.
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 
