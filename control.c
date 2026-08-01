@@ -282,8 +282,18 @@ static void handle_status(struct control *ctrl)
          * here, sent as fixed 0.0/0.000 for a consistent reply shape;
          * path is still included so a client already knows which file
          * this is.
-         */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 0 %s\n", ctrl->deck->record->pathname);
+         *
+         * relative is NOT fixed here, unlike remain/pitch - confirmed
+         * as a real bug on real hardware (2026-08-01): player_set_track()
+         * never touches relative_mode, so a deck already in relative
+         * mode stays in it straight through a new load, same as any
+         * other in-progress state. Hardcoding 0 here made the app's
+         * mode icon visibly flicker to Absolute and back for every
+         * single load while a deck was in Relative - not a meaningless
+         * import artifact like remain/pitch, a real, current, simply
+         * wrong value. */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d %s\n",
+                     ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
         if (remain < 0.0)
