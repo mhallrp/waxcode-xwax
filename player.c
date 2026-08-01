@@ -229,6 +229,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
      * just a placeholder (see struct player's own doc comment). */
     pl->timecode_valid = false;
     pl->relative_mode = false;
+    pl->relative_awaiting_signal = false;
 
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
@@ -324,6 +325,28 @@ void player_recue(struct player *pl)
 }
 
 /*
+ * Pi DVS: jump back to the track's own start point - the opposite of
+ * player_recue() above (which redefines "here" as the new start;
+ * this jumps TO the existing one). Needed specifically for relative
+ * mode: absolute mode always has a real needle position to fall back
+ * on, but relative mode's position free-runs with nothing to
+ * physically return it to zero, so a manual cue is the only way back
+ * to the beginning (owner's spec, 2026-08-01).
+ *
+ * Locked, unlike player_seek_to()/player_recue() above - those only
+ * ever write `offset`, but this writes `position` directly, the same
+ * field player_collect() reads under this same lock (via
+ * spin_try_lock) to build audio - see player_set_track()'s own
+ * position write for the established precedent.
+ */
+void player_cue_to_start(struct player *pl)
+{
+    spin_lock(&pl->lock);
+    pl->position = pl->offset;
+    spin_unlock(&pl->lock);
+}
+
+/*
  * Set the track used for the playback
  *
  * Pre: caller holds reference on track
@@ -362,6 +385,18 @@ void player_set_track(struct player *pl, struct track *track)
         pl->position = pl->offset;
 
     spin_unlock(&pl->lock);
+
+    /* Pi DVS: same "don't silently inherit stale state from the
+     * previous load" reasoning as the position reset just above, for
+     * relative mode's pitch instead of absolute mode's position - see
+     * struct player's own doc comment on relative_awaiting_signal.
+     * Outside the lock, matching every other simple flag this player
+     * struct already reads/writes cross-thread unlocked (relative_mode,
+     * timecode_valid, recalibrate) - the lock protects the
+     * position/track pair specifically, not every field. Harmless to
+     * set unconditionally even outside relative mode - only ever
+     * consulted from sync_to_timecode_relative(). */
+    pl->relative_awaiting_signal = true;
 
     track_release(x); /* discard the old track */
 }
@@ -443,13 +478,20 @@ static int sync_to_timecode(struct player *pl)
  * build_pcm(), the same "clock decoupled from timecode" mechanism
  * every mode already uses, just never corrected back).
  *
- * When the needle isn't providing a valid reading (lifted), holds
- * pitch at 1.0 rather than adopting the timecoder's own raw/filtered
+ * When the needle isn't providing a valid reading (lifted), pitch
+ * holds at 1.0 rather than adopting the timecoder's own raw/filtered
  * value - that filter (see pitch.h) is continuously fed "no movement"
  * observations while lifted and decays toward 0, which is exactly the
  * "stop" behaviour absolute mode wants but relative mode explicitly
  * shouldn't have (owner's spec: lifting the needle should leave the
- * track playing, not pause it).
+ * track playing, not pause it) - EXCEPT immediately after a fresh
+ * load (relative_awaiting_signal - see struct player's own doc
+ * comment), where holding at 1.0 would wrongly auto-play a track that
+ * was never actually cued by a real needle reading, just inheriting
+ * whatever the PREVIOUS track happened to be doing. Pitch holds at 0
+ * (paused) instead until the needle actually provides a first real
+ * reading for THIS load, at which point normal "keep playing through
+ * a lift" behaviour resumes as usual.
  */
 static void sync_to_timecode_relative(struct player *pl)
 {
@@ -459,10 +501,14 @@ static void sync_to_timecode_relative(struct player *pl)
     timecode = timecoder_get_position(pl->timecoder, &when);
     pl->timecode_valid = (timecode != -1);
 
-    if (pl->timecode_valid)
+    if (pl->timecode_valid) {
         pl->pitch = timecoder_get_pitch(pl->timecoder);
-    else
+        pl->relative_awaiting_signal = false;
+    } else if (pl->relative_awaiting_signal) {
+        pl->pitch = 0.0;
+    } else {
         pl->pitch = 1.0;
+    }
 }
 
 /*

@@ -97,6 +97,15 @@ struct rt;
  *                    next provides a valid
  *                    reading, if it isn't already) - deliberately not
  *                    an offset-preserving continuation, owner's call.
+ *
+ *   CUE           - jump back to the track's own start point (see
+ *                    player_cue_to_start()). Mainly for relative mode,
+ *                    where there's no needle position to fall back on
+ *                    to get back to the beginning, unlike absolute
+ *                    mode. No reply - a client sees the jump reflected
+ *                    in STATUS's own <remain> on the next poll, same
+ *                    "read it back rather than track it locally" idiom
+ *                    as RELATIVE above.
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 

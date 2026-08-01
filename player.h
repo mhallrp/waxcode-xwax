@@ -83,7 +83,22 @@ struct player {
          * see player_set_relative_mode() - deliberately not the
          * offset-preserving continuity an earlier design of this
          * feature considered and the owner decided against. */
-        relative_mode;
+        relative_mode,
+        /* Pi DVS: set on every fresh player_set_track() load, cleared
+         * the first time sync_to_timecode_relative() sees a genuinely
+         * valid reading since that load. While set AND the needle
+         * isn't currently valid, pitch is held at 0 (paused) instead
+         * of relative mode's usual "lift the needle, keep playing" 1.0
+         * - owner's spec, 2026-08-01: a freshly loaded track
+         * inheriting whatever pitch the PREVIOUS track happened to be
+         * moving at (eg. immediately auto-playing because the needle
+         * was lifted and idling at 1.0 before this load) is a real
+         * bug, not the intended "keep playing" behaviour, which is
+         * only meant to apply once THIS track has actually had a real
+         * needle reading at least once. Irrelevant outside relative
+         * mode - only ever consulted from
+         * sync_to_timecode_relative(). */
+        relative_awaiting_signal;
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
@@ -107,6 +122,7 @@ bool player_is_active(const struct player *pl);
 
 void player_seek_to(struct player *pl, double seconds);
 void player_recue(struct player *pl);
+void player_cue_to_start(struct player *pl);
 
 void player_collect(struct player *pl, signed short *pcm, unsigned samples);
 

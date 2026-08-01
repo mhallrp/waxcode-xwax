@@ -362,6 +362,23 @@ static void handle_relative(struct control *ctrl, bool on)
     player_set_relative_mode(&ctrl->deck->player, on);
 }
 
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_relative() above:
+ * player_cue_to_start() is a lock-protected plain field write, not
+ * one of xwax's guarded, non-realtime-safe functions.
+ */
+static void handle_cue(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: CUE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: CUE\n");
+    player_cue_to_start(&ctrl->deck->player);
+}
+
 static void handle_line(struct control *ctrl, char *line)
 {
     if (!strncmp(line, "LOAD ", 5)) {
@@ -370,6 +387,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_unload(ctrl);
     } else if (!strcmp(line, "STATUS")) {
         handle_status(ctrl);
+    } else if (!strcmp(line, "CUE")) {
+        handle_cue(ctrl);
     } else if (!strcmp(line, "RELATIVE ON")) {
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {
