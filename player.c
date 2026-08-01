@@ -335,15 +335,49 @@ void player_recue(struct player *pl)
  *
  * Locked, unlike player_seek_to()/player_recue() above - those only
  * ever write `offset`, but this writes `position` directly, the same
- * field player_collect() reads under this same lock (via
- * spin_try_lock) to build audio - see player_set_track()'s own
- * position write for the established precedent.
+ * field player_collect() reads to build audio.
+ *
+ * MUST use spin_try_lock(), not spin_lock() - confirmed as a real,
+ * hardware-crashing bug (2026-08-01): unlike player_set_track() (whose
+ * spin_lock() call is legitimate - it runs on the dedicated LOAD
+ * worker thread, see control.c's own IMPORTANT #2), this function is
+ * called from handle_cue(), directly on the realtime thread itself,
+ * same as player_collect(). spin_lock()'s own precondition is
+ * "current thread is not realtime" (see spin.h) - it calls
+ * rt_not_allowed() unconditionally, which aborts the whole process the
+ * instant a real CUE command arrived, crashing xwax and restarting it
+ * with nothing loaded (read as "the track got unloaded" from the
+ * app). spin_try_lock() is what player_collect() already uses for
+ * this exact reason; on the rare miss (worker thread mid-swap in
+ * player_set_track()) this just silently no-ops rather than blocking -
+ * acceptable, the same tradeoff player_collect() already makes.
+ *
+ * Pi DVS (owner's spec, 2026-08-01): if the needle is down and
+ * providing a real reading right now, cueing should start the track
+ * playing from its own beginning immediately, following the live
+ * pitch as usual - no extra work needed here, sync_to_timecode_relative()
+ * already drives pitch from the needle every buffer regardless of this
+ * call. But if the needle is currently up (not providing a valid
+ * reading), relative mode's normal "keep playing through a lift"
+ * behaviour would otherwise carry the OLD pitch straight through this
+ * jump, silently auto-playing from the new start point with nobody's
+ * hand on the record - same "inheriting stale state" problem
+ * player_set_track() already solves for a fresh load via
+ * relative_awaiting_signal (see struct player's own doc comment), so
+ * this reuses exactly that flag: pitch holds at 0 (paused, ready for
+ * the needle to be dropped) until the needle actually provides its
+ * next real reading. Outside the lock, same reasoning as
+ * player_set_track()'s own write to this field - a plain flag, not
+ * one the lock protects.
  */
 void player_cue_to_start(struct player *pl)
 {
-    spin_lock(&pl->lock);
-    pl->position = pl->offset;
-    spin_unlock(&pl->lock);
+    if (spin_try_lock(&pl->lock)) {
+        pl->position = pl->offset;
+        spin_unlock(&pl->lock);
+    }
+    if (!pl->timecode_valid)
+        pl->relative_awaiting_signal = true;
 }
 
 /*
