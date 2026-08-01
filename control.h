@@ -78,6 +78,23 @@ struct rt;
  * There's deliberately no PASSTHRU command here - passthrough is
  * implemented outside xwax entirely (UNLOAD plus an external alsaloop
  * process, see above), not as a mode xwax itself knows about.
+ *
+ *   RELATIVE ON|OFF - toggle relative mode (see player_set_relative_
+ *                    mode()/struct player's own doc comment for the
+ *                    full design). While ON, the needle still drives
+ *                    live pitch/scratch when it's down, but its
+ *                    absolute position is never consulted, so lifting
+ *                    it simply leaves the track playing rather than
+ *                    stopping it - unlike normal absolute mode. No
+ *                    reply either way; STATUS's <pitch> field already
+ *                    reflects live scratch/speed while this is on, no
+ *                    separate field needed to know it's active this
+ *                    side of the socket (Node/the app track their own
+ *                    request, same as PASSTHRU above). Switching back
+ *                    OFF is a plain snap to wherever the needle
+ *                    currently reads (once it next provides a valid
+ *                    reading, if it isn't already) - deliberately not
+ *                    an offset-preserving continuation, owner's call.
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 

@@ -228,6 +228,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
      * no signal to speak of - false is the honest starting value, not
      * just a placeholder (see struct player's own doc comment). */
     pl->timecode_valid = false;
+    pl->relative_mode = false;
 
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
@@ -274,6 +275,22 @@ void player_set_internal_playback(struct player *pl)
 {
     pl->timecode_control = false;
     pl->pitch = 1.0;
+}
+
+/*
+ * Pi DVS: enable or disable relative mode (owner's spec, 2026-08-01) -
+ * see struct player's own doc comment for the full design. Turning it
+ * off schedules the SAME plain position-snap player_set_timecode_control()
+ * already uses when re-enabling absolute mode from off, by reusing
+ * `recalibrate` - relative mode leaves timecode_control itself
+ * untouched throughout, so that's the only signal retarget() has to
+ * know a snap is due.
+ */
+void player_set_relative_mode(struct player *pl, bool on)
+{
+    pl->relative_mode = on;
+    if (!on)
+        pl->recalibrate = true;
 }
 
 double player_get_position(struct player *pl)
@@ -418,6 +435,37 @@ static int sync_to_timecode(struct player *pl)
 }
 
 /*
+ * Pi DVS: update pitch from the timecoder while in relative mode.
+ * Unlike sync_to_timecode(), this never sets target_position - so
+ * retarget() never runs and never pulls `position` back toward an
+ * absolute reading, which is the whole point of relative mode
+ * (position just free-runs from whatever `pitch` integrates to in
+ * build_pcm(), the same "clock decoupled from timecode" mechanism
+ * every mode already uses, just never corrected back).
+ *
+ * When the needle isn't providing a valid reading (lifted), holds
+ * pitch at 1.0 rather than adopting the timecoder's own raw/filtered
+ * value - that filter (see pitch.h) is continuously fed "no movement"
+ * observations while lifted and decays toward 0, which is exactly the
+ * "stop" behaviour absolute mode wants but relative mode explicitly
+ * shouldn't have (owner's spec: lifting the needle should leave the
+ * track playing, not pause it).
+ */
+static void sync_to_timecode_relative(struct player *pl)
+{
+    double when;
+    signed int timecode;
+
+    timecode = timecoder_get_position(pl->timecoder, &when);
+    pl->timecode_valid = (timecode != -1);
+
+    if (pl->timecode_valid)
+        pl->pitch = timecoder_get_pitch(pl->timecoder);
+    else
+        pl->pitch = 1.0;
+}
+
+/*
  * Synchronise to the position given by the timecoder without
  * affecting the audio playback position
  */
@@ -499,7 +547,13 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
 
     dt = pl->sample_dt * samples;
 
-    if (pl->timecode_control) {
+    /* Pi DVS: relative mode is checked first and is an independent
+     * override, not a variant of timecode_control - see struct
+     * player's own doc comment. timecode_control's existing absolute/
+     * internal-playback behaviour is otherwise completely unchanged. */
+    if (pl->relative_mode) {
+        sync_to_timecode_relative(pl);
+    } else if (pl->timecode_control) {
         if (sync_to_timecode(pl) == -1)
             pl->timecode_control = false;
     }

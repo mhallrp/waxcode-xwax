@@ -331,6 +331,26 @@ static void handle_status(struct control *ctrl)
         perror("control: write STATUS reply");
 }
 
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - unlike LOAD/UNLOAD, this is safe to do directly
+ * here rather than handing off to the worker thread: player_set_
+ * relative_mode() is a couple of plain field writes (see player.c),
+ * not one of xwax's guarded, non-realtime-safe functions - same
+ * reasoning as handle_status() below already relies on for its own
+ * direct field reads.
+ */
+static void handle_relative(struct control *ctrl, bool on)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: RELATIVE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: RELATIVE %s\n", on ? "ON" : "OFF");
+    player_set_relative_mode(&ctrl->deck->player, on);
+}
+
 static void handle_line(struct control *ctrl, char *line)
 {
     if (!strncmp(line, "LOAD ", 5)) {
@@ -339,6 +359,10 @@ static void handle_line(struct control *ctrl, char *line)
         handle_unload(ctrl);
     } else if (!strcmp(line, "STATUS")) {
         handle_status(ctrl);
+    } else if (!strcmp(line, "RELATIVE ON")) {
+        handle_relative(ctrl, true);
+    } else if (!strcmp(line, "RELATIVE OFF")) {
+        handle_relative(ctrl, false);
     } else {
         fprintf(stderr, "control: unrecognised command '%s'\n", line);
     }

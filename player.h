@@ -65,7 +65,25 @@ struct player {
          * whether a fresh load should start at track position 0
          * rather than silently inheriting wherever the timecode
          * happened to leave off from whatever was loaded before. */
-        timecode_valid;
+        timecode_valid,
+        /* Pi DVS: "relative mode" (owner's spec, 2026-08-01) - unlike
+         * timecode_control's absolute mode, the needle still drives
+         * live pitch/scratch while it's down (see
+         * sync_to_timecode_relative() in player.c), but its absolute
+         * position is never consulted, so lifting the needle simply
+         * leaves the track playing rather than stopping it. Checked
+         * ahead of timecode_control in player_collect() - an
+         * independent override, not a variant of the existing
+         * absolute/internal binary, so that binary's own behaviour
+         * stays provably unchanged for the (currently unused, but not
+         * removed) case where something else still relies on it.
+         * Returning to absolute mode is a plain position snap using
+         * the SAME recalibrate/calibrate_to_timecode_position() path
+         * timecode_control already uses when re-enabled from off -
+         * see player_set_relative_mode() - deliberately not the
+         * offset-preserving continuity an earlier design of this
+         * feature considered and the owner decided against. */
+        relative_mode;
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
@@ -77,6 +95,7 @@ void player_set_timecoder(struct player *pl, struct timecoder *tc);
 void player_set_timecode_control(struct player *pl, bool on);
 bool player_toggle_timecode_control(struct player *pl);
 void player_set_internal_playback(struct player *pl);
+void player_set_relative_mode(struct player *pl, bool on);
 
 void player_set_track(struct player *pl, struct track *track);
 void player_clone(struct player *pl, const struct player *from);
