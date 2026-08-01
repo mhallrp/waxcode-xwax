@@ -41,8 +41,8 @@ struct rt;
  *                    both drive the same output at once. No reply;
  *                    a following STATUS will show EMPTY once it's
  *                    taken effect.
- *   STATUS        - reply with "STATUS EMPTY 0.0 0.000\n" if nothing's
- *                    loaded, "STATUS IMPORTING 0.0 0.000 <path>\n" if a
+ *   STATUS        - reply with "STATUS EMPTY 0.0 0.000 0\n" if nothing's
+ *                    loaded, "STATUS IMPORTING 0.0 0.000 0 <path>\n" if a
  *                    LOAD was issued but xwax's own import subprocess
  *                    is still decoding it (see track_is_importing() -
  *                    track->length only reflects however much has
@@ -50,7 +50,7 @@ struct rt;
  *                    would otherwise be a real but meaningless,
  *                    steadily-growing number, confirmed as a real,
  *                    confusing thing to show on real hardware), or
- *                    "STATUS <PLAYING|STOPPED> <remain> <pitch> <path>\n"
+ *                    "STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <path>\n"
  *                    once import's done. <remain> is seconds left in
  *                    the loaded track, clamped to >= 0. PLAYING/STOPPED
  *                    reflects player_is_active() - whether the
@@ -67,7 +67,9 @@ struct rt;
  *                    player_is_active() already reads it one line away,
  *                    not a new access pattern. EMPTY/IMPORTING report a
  *                    fixed 0.000 - meaningless in those states, kept
- *                    only for a consistent field shape. <path> is the
+ *                    only for a consistent field shape. <relative>
+ *                    (added 2026-08-01) is 0/1, struct player's own
+ *                    relative_mode - see RELATIVE below. <path> is the
  *                    loaded file's path, unquoted and always the last
  *                    field (may contain spaces, never a newline) - lets
  *                    a client recover "what's actually loaded on this
@@ -86,13 +88,13 @@ struct rt;
  *                    absolute position is never consulted, so lifting
  *                    it simply leaves the track playing rather than
  *                    stopping it - unlike normal absolute mode. No
- *                    reply either way; STATUS's <pitch> field already
- *                    reflects live scratch/speed while this is on, no
- *                    separate field needed to know it's active this
- *                    side of the socket (Node/the app track their own
- *                    request, same as PASSTHRU above). Switching back
- *                    OFF is a plain snap to wherever the needle
- *                    currently reads (once it next provides a valid
+ *                    reply either way - a client learns the current
+ *                    state from STATUS's own <relative> field above,
+ *                    same as every other piece of deck state (Node/
+ *                    the app don't need to track their own request
+ *                    separately). Switching back OFF is a plain snap
+ *                    to wherever the needle currently reads (once it
+ *                    next provides a valid
  *                    reading, if it isn't already) - deliberately not
  *                    an offset-preserving continuation, owner's call.
  */

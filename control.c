@@ -261,8 +261,10 @@ static void handle_status(struct control *ctrl)
         /* No path field at all when nothing's loaded - there's nothing
          * meaningful to report, and it keeps this, the common idle
          * case, a fixed, simple shape. pitch is meaningless here too -
-         * fixed 0.000, same reasoning as remain below. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000\n");
+         * fixed 0.000, same reasoning as remain below. relative
+         * (added 2026-08-01) is fixed 0 here too - relative mode can't
+         * be meaningfully on for an empty deck. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0\n");
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* A LOAD was issued, but xwax's own import subprocess (see
          * track.c) is still decoding the file - track->length only
@@ -281,7 +283,7 @@ static void handle_status(struct control *ctrl)
          * path is still included so a client already knows which file
          * this is.
          */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %s\n", ctrl->deck->record->pathname);
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 0 %s\n", ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
         if (remain < 0.0)
@@ -311,9 +313,18 @@ static void handle_status(struct control *ctrl)
          * corrected abruptly every tick. Confirmed as a real
          * contributor to "not smooth" playback/scrub feel on real
          * hardware, even with pitch-based interpolation already in
-         * place. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %s\n",
-                     state, remain, ctrl->deck->player.pitch, ctrl->deck->record->pathname);
+         * place.
+         *
+         * relative (added 2026-08-01): struct player's own
+         * relative_mode field, read the same direct/lock-free way
+         * pitch is - lets a client show whether this deck's needle
+         * currently drives live scratch/pitch only, or full absolute
+         * position too (see player.h's own doc comment on the
+         * feature). 0/1, not a word, to stay consistent with the
+         * fixed-width numeric fields either side of it. */
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %s\n",
+                     state, remain, ctrl->deck->player.pitch,
+                     ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
     }
 
     if (n < 0 || (size_t)n >= sizeof reply) {
