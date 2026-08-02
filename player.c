@@ -230,6 +230,9 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->timecode_valid = false;
     pl->relative_mode = false;
     pl->relative_awaiting_signal = false;
+    pl->loop_active = false;
+    pl->loop_start = 0.0;
+    pl->loop_end = 0.0;
 
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
@@ -290,8 +293,51 @@ void player_set_internal_playback(struct player *pl)
 void player_set_relative_mode(struct player *pl, bool on)
 {
     pl->relative_mode = on;
-    if (!on)
+    if (!on) {
         pl->recalibrate = true;
+        /* Pi DVS: a loop only ever applies in relative mode (see
+         * player_collect()'s own gate) - clearing it here rather than
+         * just leaving loop_active stale means re-entering relative
+         * mode later never silently resumes an old loop the owner
+         * never re-requested. */
+        pl->loop_active = false;
+    }
+}
+
+/*
+ * Pi DVS: activate a loop between [start_seconds, end_seconds) of the
+ * track's own elapsed time (owner's spec, 2026-08-02 - a simple loop
+ * toggle for relative mode, the app decides what range to send, eg. a
+ * bar's worth from the beat grid). Converts to position-space once
+ * here (adding the player's own fixed `offset`) so player_collect()'s
+ * own realtime wraparound check never needs to repeat that arithmetic
+ * every buffer. Only takes effect while relative_mode is on - see
+ * player_collect()'s own gate; absolute mode's position is dictated
+ * by the physical needle, there's nothing here to loop against.
+ *
+ * Plain field writes, not lock-protected - called from handle_loop(),
+ * already on the realtime thread itself (see control.c's own
+ * IMPORTANT #1), so there's no genuine cross-thread race to guard
+ * against here, same reasoning as player_set_relative_mode() above.
+ * xwax's own spin_lock() restricts itself from being called on a
+ * realtime thread at all (see spin.h) - that restriction simply
+ * doesn't apply to plain field writes like these.
+ */
+void player_set_loop(struct player *pl, double start_seconds, double end_seconds)
+{
+    pl->loop_start = pl->offset + start_seconds;
+    pl->loop_end = pl->offset + end_seconds;
+    pl->loop_active = true;
+}
+
+/*
+ * Pi DVS: deactivate a loop - playback continues from wherever
+ * `position` currently is, no jump (owner's spec, 2026-08-02: "press
+ * again to stop looping, continue playing").
+ */
+void player_clear_loop(struct player *pl)
+{
+    pl->loop_active = false;
 }
 
 double player_get_position(struct player *pl)
@@ -431,6 +477,12 @@ void player_set_track(struct player *pl, struct track *track)
      * set unconditionally even outside relative mode - only ever
      * consulted from sync_to_timecode_relative(). */
     pl->relative_awaiting_signal = true;
+
+    /* Pi DVS: a loop bound to the PREVIOUS track's own timing is
+     * meaningless for whatever's being loaded now - same "don't
+     * silently inherit stale state" reasoning as relative_awaiting_
+     * signal just above. Plain flag, same lock status as that field. */
+    pl->loop_active = false;
 
     track_release(x); /* discard the old track */
 }
@@ -676,4 +728,26 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
 
     pl->position += r;
     pl->volume = target_volume;
+
+    /* Pi DVS: loop wraparound (owner's spec, 2026-08-02) - relative
+     * mode only, see player_set_loop()'s own doc comment for why.
+     * fmod-based rather than a flat snap to loop_start/loop_end, so a
+     * single buffer that advances (or, scratching backward, retreats)
+     * past more than the loop's own length still wraps to the correct
+     * PHASE within the loop instead of always landing exactly on its
+     * edge - matters at high scratch speeds, negligible at normal
+     * playback pitch. Symmetric: handles both a forward loop-end
+     * crossing and a backward loop-start crossing, since relative
+     * mode's pitch (and therefore this loop) can run in either
+     * direction under a real scratch. */
+    if (pl->relative_mode && pl->loop_active) {
+        double loop_length = pl->loop_end - pl->loop_start;
+
+        if (loop_length > 0) {
+            if (pl->position >= pl->loop_end)
+                pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
+            else if (pl->position < pl->loop_start)
+                pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
+        }
+    }
 }

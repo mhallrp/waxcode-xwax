@@ -389,6 +389,36 @@ static void handle_cue(struct control *ctrl)
     player_cue_to_start(&ctrl->deck->player);
 }
 
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_relative()/handle_cue()
+ * above: player_set_loop()/player_clear_loop() are plain field
+ * writes, not one of xwax's guarded, non-realtime-safe functions.
+ */
+static void handle_loop(struct control *ctrl, const char *args)
+{
+    double start, end;
+
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: LOOP received before a deck was assigned\n");
+        return;
+    }
+
+    if (!strcmp(args, "OFF")) {
+        fprintf(stderr, "control: LOOP OFF\n");
+        player_clear_loop(&ctrl->deck->player);
+        return;
+    }
+
+    if (sscanf(args, "%lf %lf", &start, &end) != 2) {
+        fprintf(stderr, "control: malformed LOOP command '%s'\n", args);
+        return;
+    }
+
+    fprintf(stderr, "control: LOOP %.3f %.3f\n", start, end);
+    player_set_loop(&ctrl->deck->player, start, end);
+}
+
 static void handle_line(struct control *ctrl, char *line)
 {
     if (!strncmp(line, "LOAD ", 5)) {
@@ -403,6 +433,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {
         handle_relative(ctrl, false);
+    } else if (!strncmp(line, "LOOP ", 5)) {
+        handle_loop(ctrl, line + 5);
     } else {
         fprintf(stderr, "control: unrecognised command '%s'\n", line);
     }

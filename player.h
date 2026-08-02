@@ -98,7 +98,18 @@ struct player {
          * needle reading at least once. Irrelevant outside relative
          * mode - only ever consulted from
          * sync_to_timecode_relative(). */
-        relative_awaiting_signal;
+        relative_awaiting_signal,
+        /* Pi DVS: a loop is active between [loop_start, loop_end)
+         * below (owner's spec, 2026-08-02) - see player_set_loop()'s
+         * own doc comment. Only ever consulted from player_collect(),
+         * and only while relative_mode is also on - absolute mode's
+         * position is dictated by the physical needle, there's
+         * nothing here to loop against. */
+        loop_active;
+
+    double loop_start, loop_end; /* seconds, position-space (already
+                                   * offset-adjusted) - valid only
+                                   * while loop_active */
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
@@ -111,6 +122,8 @@ void player_set_timecode_control(struct player *pl, bool on);
 bool player_toggle_timecode_control(struct player *pl);
 void player_set_internal_playback(struct player *pl);
 void player_set_relative_mode(struct player *pl, bool on);
+void player_set_loop(struct player *pl, double start_seconds, double end_seconds);
+void player_clear_loop(struct player *pl);
 
 void player_set_track(struct player *pl, struct track *track);
 void player_clone(struct player *pl, const struct player *from);

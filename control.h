@@ -106,6 +106,23 @@ struct rt;
  *                    in STATUS's own <remain> on the next poll, same
  *                    "read it back rather than track it locally" idiom
  *                    as RELATIVE above.
+ *
+ *   LOOP <start> <end> - loop the track's own elapsed-time range
+ *                    [start, end) (seconds, same convention as
+ *                    STATUS's <remain>/player_get_elapsed()) - see
+ *                    player_set_loop(). The caller decides the range
+ *                    (eg. the app computing one bar from its own beat
+ *                    grid); xwax has no notion of tempo/bars itself.
+ *                    Only takes effect while relative mode is on (see
+ *                    player_collect()'s own gate) - absolute mode's
+ *                    position is dictated by the physical needle,
+ *                    there's nothing here to loop against.
+ *   LOOP OFF      - stop looping (see player_clear_loop()) - playback
+ *                    continues from wherever the loop currently is,
+ *                    no jump. No reply either way - same "read it back
+ *                    from STATUS" idiom as RELATIVE/CUE above, though
+ *                    LOOP has no STATUS field of its own (a client
+ *                    that set the loop already knows it's active).
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 
