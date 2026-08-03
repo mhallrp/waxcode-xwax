@@ -42,9 +42,10 @@ struct rt;
  *                    a following STATUS will show EMPTY once it's
  *                    taken effect.
  *   STATUS        - reply with "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000
- *                    0.000\n" if nothing's loaded, "STATUS IMPORTING 0.0
- *                    0.000 0 0.000 0 0.000 0.000 <path>\n" if a LOAD was
- *                    issued but xwax's own import subprocess is still
+ *                    0.000 <timecodeDisabled>\n" if nothing's loaded,
+ *                    "STATUS IMPORTING 0.0 0.000 0 0.000 0 0.000 0.000
+ *                    <timecodeDisabled> <path>\n" if a LOAD was issued
+ *                    but xwax's own import subprocess is still
  *                    decoding it (see track_is_importing() - track->
  *                    length only reflects however much has decoded SO
  *                    FAR during this window, so remain would otherwise
@@ -52,7 +53,8 @@ struct rt;
  *                    confirmed as a real, confusing thing to show on
  *                    real hardware), or "STATUS <PLAYING|STOPPED>
  *                    <remain> <pitch> <relative> <cuePoint> <loopActive>
- *                    <loopStart> <loopEnd> <path>\n" once import's done.
+ *                    <loopStart> <loopEnd> <timecodeDisabled> <path>\n"
+ *                    once import's done.
  *                    <remain> is seconds left in the loaded track,
  *                    clamped to >= 0. PLAYING/STOPPED reflects player_is_
  *                    active() - whether the platter's currently spinning
@@ -87,13 +89,20 @@ struct rt;
  *                    as cuePoint just above (see LOOP below for why a
  *                    client can no longer just track this itself).
  *                    <loopStart>/<loopEnd> are 0.000 whenever
- *                    <loopActive> is 0. <path> is the loaded file's
- *                    path, unquoted and always the last field (may
- *                    contain spaces, never a newline) - lets a client
- *                    recover "what's actually loaded on this deck" after
- *                    its OWN restart, since xwax is the one thing that
- *                    keeps running (and keeps the real answer) through a
- *                    Node or app restart.
+ *                    <loopActive> is 0. <timecodeDisabled> (added
+ *                    2026-08-04) is player_get_timecode_disabled() -
+ *                    "full internal mode" (owner's spec) - see
+ *                    TIMECODE below. NOT fixed for EMPTY/IMPORTING,
+ *                    unlike cuePoint/loopActive - it's a persistent,
+ *                    box-wide engine setting, not scoped to whatever
+ *                    track happens to be loaded (same treatment
+ *                    <relative> already gets). <path> is the loaded
+ *                    file's path, unquoted and always the last field
+ *                    (may contain spaces, never a newline) - lets a
+ *                    client recover "what's actually loaded on this
+ *                    deck" after its OWN restart, since xwax is the one
+ *                    thing that keeps running (and keeps the real
+ *                    answer) through a Node or app restart.
  *
  * There's deliberately no PASSTHRU command here - passthrough is
  * implemented outside xwax entirely (UNLOAD plus an external alsaloop
@@ -115,6 +124,34 @@ struct rt;
  *                    next provides a valid
  *                    reading, if it isn't already) - deliberately not
  *                    an offset-preserving continuation, owner's call.
+ *
+ *   TIMECODE ON|OFF - "full internal mode" (owner's spec, 2026-08-04:
+ *                    a real Bluetooth-master-output "no turntables, no
+ *                    mixer" DJ mode) - OFF makes this deck permanently
+ *                    ignore the real timecoder reading while in
+ *                    relative mode, behaving exactly as if the needle
+ *                    were always lifted (see player_set_timecode_
+ *                    disabled()/sync_to_timecode_relative()'s own doc
+ *                    comments), regardless of what's actually present
+ *                    on the ADC8x input. Independent of RELATIVE itself
+ *                    - only has any effect while relative mode is also
+ *                    on, and persists across a fresh LOAD the same way
+ *                    RELATIVE's own on/off choice does (not reset per-
+ *                    track like SET_CUE/LOOP). Note the naming: ON here
+ *                    means "timecode is enabled" (normal operation),
+ *                    OFF means "full internal mode" - matching how a
+ *                    client would naturally phrase the command, the
+ *                    inverse of the underlying timecode_disabled field
+ *                    it sets. No reply - a client reads the current
+ *                    state back from STATUS's own <timecodeDisabled>
+ *                    field above, same idiom as RELATIVE. Does NOT stop
+ *                    the underlying ADC8x capture/timecoder decode
+ *                    itself (see realtime.c) - deliberately not that
+ *                    much more invasive a change to the realtime I/O
+ *                    path for no additional behavioural difference;
+ *                    simply never consulting the result already makes
+ *                    the turntable's signal have zero influence on
+ *                    playback.
  *
  *   SEEK <seconds> - jump the playhead to an arbitrary elapsed-time
  *                    offset within the track (same convention as

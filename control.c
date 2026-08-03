@@ -267,8 +267,13 @@ static void handle_status(struct control *ctrl)
          * 2026-08-03) is fixed 0.000 too, same reasoning. loopActive/
          * loopStart/loopEnd (added 2026-08-04) are fixed 0/0.000/0.000,
          * same reasoning again - there's nothing to loop on an empty
-         * deck. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000 0.000\n");
+         * deck. timecodeDisabled (added 2026-08-04) is NOT fixed,
+         * unlike those - it's a persistent, box-wide engine setting
+         * (same treatment as relative_mode below in IMPORTING), not
+         * scoped to any particular loaded track, so it can be
+         * meaningfully on even with nothing loaded. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000 0.000 %d\n",
+                     player_get_timecode_disabled(&ctrl->deck->player) ? 1 : 0);
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* A LOAD was issued, but xwax's own import subprocess (see
          * track.c) is still decoding the file - track->length only
@@ -303,9 +308,13 @@ static void handle_status(struct control *ctrl)
          * preserve the way there was for relative_mode. loopActive/
          * loopStart/loopEnd (added 2026-08-04) are fixed too, same
          * reasoning as cuePoint - player_set_track() clears loop_active
-         * on every fresh load. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %s\n",
-                     ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
+         * on every fresh load. timecodeDisabled is NOT fixed, same
+         * reasoning as relative just above - it's persistent, not
+         * track-scoped. */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %d %s\n",
+                     ctrl->deck->player.relative_mode ? 1 : 0,
+                     player_get_timecode_disabled(&ctrl->deck->player) ? 1 : 0,
+                     ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
         if (remain < 0.0)
@@ -364,14 +373,20 @@ static void handle_status(struct control *ctrl)
          * at all while xwax kept faithfully looping underneath it.
          * loopStart/loopEnd are 0.000 whenever loopActive is 0, same
          * "meaningless while inactive" convention as cuePoint's own
-         * EMPTY/IMPORTING fields. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %s\n",
+         * EMPTY/IMPORTING fields.
+         *
+         * timecodeDisabled (added 2026-08-04): player_get_timecode_
+         * disabled() - "full internal mode" (owner's spec) - reported
+         * back the same "read it back" idiom as everything else here,
+         * persistent/not track-scoped same as relative. */
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %d %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_cue_point_elapsed(&ctrl->deck->player),
                      player_get_loop_active(&ctrl->deck->player) ? 1 : 0,
                      player_get_loop_start_elapsed(&ctrl->deck->player),
                      player_get_loop_end_elapsed(&ctrl->deck->player),
+                     player_get_timecode_disabled(&ctrl->deck->player) ? 1 : 0,
                      ctrl->deck->record->pathname);
     }
 
@@ -408,6 +423,23 @@ static void handle_relative(struct control *ctrl, bool on)
 
     fprintf(stderr, "control: RELATIVE %s\n", on ? "ON" : "OFF");
     player_set_relative_mode(&ctrl->deck->player, on);
+}
+
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_relative() above:
+ * player_set_timecode_disabled() is a plain field write, not one of
+ * xwax's guarded, non-realtime-safe functions.
+ */
+static void handle_timecode(struct control *ctrl, bool on)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: TIMECODE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: TIMECODE %s\n", on ? "ON" : "OFF");
+    player_set_timecode_disabled(&ctrl->deck->player, !on);
 }
 
 /*
@@ -542,6 +574,10 @@ static void handle_line(struct control *ctrl, char *line)
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {
         handle_relative(ctrl, false);
+    } else if (!strcmp(line, "TIMECODE ON")) {
+        handle_timecode(ctrl, true);
+    } else if (!strcmp(line, "TIMECODE OFF")) {
+        handle_timecode(ctrl, false);
     } else if (!strncmp(line, "LOOP ", 5)) {
         handle_loop(ctrl, line + 5);
     } else {

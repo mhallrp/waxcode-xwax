@@ -105,7 +105,23 @@ struct player {
          * and only while relative_mode is also on - absolute mode's
          * position is dictated by the physical needle, there's
          * nothing here to loop against. */
-        loop_active;
+        loop_active,
+        /* Pi DVS: "full internal mode" (owner's spec, 2026-08-04) -
+         * while set, sync_to_timecode_relative() never consults the
+         * real timecoder reading at all, behaving exactly as if the
+         * needle were permanently lifted (same "hold pitch at 1.0"
+         * logic that already exists for a genuinely lifted needle -
+         * see that function's own doc comment), regardless of what's
+         * actually present on the ADC8x input. Independent of
+         * relative_mode itself - this only has any effect while
+         * relative_mode is also on (sync_to_timecode_relative() is
+         * only ever called from there), same layering as loop_active
+         * above. Does NOT stop the underlying ADC8x capture/timecoder
+         * decode (see realtime.c) - deliberately not that much more
+         * invasive a change for no additional behavioural difference;
+         * simply never consulting the result is enough to make the
+         * turntable's signal have zero influence on playback. */
+        timecode_disabled;
 
     double loop_start, loop_end; /* seconds, position-space (already
                                    * offset-adjusted) - valid only
@@ -146,6 +162,13 @@ void player_clear_loop(struct player *pl);
 bool player_get_loop_active(struct player *pl);
 double player_get_loop_start_elapsed(struct player *pl);
 double player_get_loop_end_elapsed(struct player *pl);
+
+/* Pi DVS (owner's spec, 2026-08-04): "full internal mode" - see
+ * timecode_disabled's own doc comment above. player_get_timecode_
+ * disabled() reported back via STATUS, same "read it back rather than
+ * track it locally" idiom as relative_mode/loop_active. */
+void player_set_timecode_disabled(struct player *pl, bool on);
+bool player_get_timecode_disabled(struct player *pl);
 
 void player_set_track(struct player *pl, struct track *track);
 void player_clone(struct player *pl, const struct player *from);

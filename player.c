@@ -234,6 +234,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->loop_start = 0.0;
     pl->loop_end = 0.0;
     pl->cue_point = pl->offset;
+    pl->timecode_disabled = false;
 
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
@@ -518,6 +519,26 @@ double player_get_loop_end_elapsed(struct player *pl)
 }
 
 /*
+ * Pi DVS: "full internal mode" (owner's spec, 2026-08-04) - see
+ * struct player's own doc comment on timecode_disabled. Plain field
+ * write, not lock-protected - called from handle_timecode() below,
+ * already on the realtime thread itself, same reasoning as
+ * player_set_loop()/player_set_relative_mode() above. Deliberately NOT
+ * reset by player_set_track() (unlike loop_active/cue_point) - this is
+ * a persistent, box-wide mode choice, not something scoped to one
+ * track's own load, same treatment relative_mode itself already gets.
+ */
+void player_set_timecode_disabled(struct player *pl, bool on)
+{
+    pl->timecode_disabled = on;
+}
+
+bool player_get_timecode_disabled(struct player *pl)
+{
+    return pl->timecode_disabled;
+}
+
+/*
  * Pi DVS: jump to the stored cue point and pause there (owner's spec,
  * 2026-08-03) - GOTO_CUE, replacing the old fixed player_cue_to_start()
  * (which this now subsumes: `cue_point` defaults to the track's own
@@ -724,6 +745,17 @@ static void sync_to_timecode_relative(struct player *pl)
 {
     double when;
     signed int timecode;
+
+    /* Pi DVS: "full internal mode" (owner's spec, 2026-08-04) - while
+     * timecode_disabled, never consult the real timecoder reading at
+     * all, behaving exactly as if the needle were permanently lifted
+     * (see the "needle isn't providing a valid reading" branch below,
+     * same logic) regardless of what's actually on the ADC8x input. */
+    if (pl->timecode_disabled) {
+        pl->timecode_valid = false;
+        pl->pitch = pl->relative_awaiting_signal ? 0.0 : 1.0;
+        return;
+    }
 
     timecode = timecoder_get_position(pl->timecoder, &when);
     pl->timecode_valid = (timecode != -1);
