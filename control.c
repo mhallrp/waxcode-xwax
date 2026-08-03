@@ -263,8 +263,9 @@ static void handle_status(struct control *ctrl)
          * case, a fixed, simple shape. pitch is meaningless here too -
          * fixed 0.000, same reasoning as remain below. relative
          * (added 2026-08-01) is fixed 0 here too - relative mode can't
-         * be meaningfully on for an empty deck. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0\n");
+         * be meaningfully on for an empty deck. cuePoint (added
+         * 2026-08-03) is fixed 0.000 too, same reasoning. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000\n");
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* A LOAD was issued, but xwax's own import subprocess (see
          * track.c) is still decoding the file - track->length only
@@ -291,8 +292,13 @@ static void handle_status(struct control *ctrl)
          * mode icon visibly flicker to Absolute and back for every
          * single load while a deck was in Relative - not a meaningless
          * import artifact like remain/pitch, a real, current, simply
-         * wrong value. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d %s\n",
+         * wrong value.
+         *
+         * cuePoint (added 2026-08-03) IS fixed here, unlike relative -
+         * a fresh load always resets it to the new track's own start
+         * (see player_set_track()), so there's nothing stale to
+         * preserve the way there was for relative_mode. */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 %s\n",
                      ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
@@ -331,10 +337,21 @@ static void handle_status(struct control *ctrl)
          * currently drives live scratch/pitch only, or full absolute
          * position too (see player.h's own doc comment on the
          * feature). 0/1, not a word, to stay consistent with the
-         * fixed-width numeric fields either side of it. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %s\n",
+         * fixed-width numeric fields either side of it.
+         *
+         * cuePoint (added 2026-08-03): player_get_cue_point_elapsed(),
+         * same elapsed-time convention as remain - reported back
+         * rather than left for the app to track client-side (which
+         * would go stale across a reconnect, or across leaving and
+         * re-entering relative mode, tearing down that view's own
+         * @State) so the app can draw a real cue marker on the
+         * waveform that's always in sync with the box's own actual
+         * cue point, the same "read it back from STATUS" idiom
+         * relative/pitch/remain already use. */
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %s\n",
                      state, remain, ctrl->deck->player.pitch,
-                     ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
+                     ctrl->deck->player.relative_mode ? 1 : 0,
+                     player_get_cue_point_elapsed(&ctrl->deck->player), ctrl->deck->record->pathname);
     }
 
     if (n < 0 || (size_t)n >= sizeof reply) {
@@ -399,17 +416,27 @@ static void handle_seek(struct control *ctrl, const char *args)
 /*
  * Runs on the realtime thread (called from realtime(), via
  * handle_line()) - same reasoning as handle_seek() above:
- * player_set_cue_point() is a plain field write.
+ * player_set_cue_point() is a plain field write. Takes an explicit
+ * target rather than always using the deck's current position - see
+ * player_set_cue_point()'s own doc comment for why (beat-grid
+ * snapping happens app-side, xwax has no notion of tempo/bars).
  */
-static void handle_set_cue(struct control *ctrl)
+static void handle_set_cue(struct control *ctrl, const char *args)
 {
+    double seconds;
+
     if (ctrl->deck == NULL) {
         fprintf(stderr, "control: SET_CUE received before a deck was assigned\n");
         return;
     }
 
-    fprintf(stderr, "control: SET_CUE\n");
-    player_set_cue_point(&ctrl->deck->player);
+    if (sscanf(args, "%lf", &seconds) != 1) {
+        fprintf(stderr, "control: malformed SET_CUE command '%s'\n", args);
+        return;
+    }
+
+    fprintf(stderr, "control: SET_CUE %.3f\n", seconds);
+    player_set_cue_point(&ctrl->deck->player, seconds);
 }
 
 /*
@@ -484,8 +511,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_status(ctrl);
     } else if (!strncmp(line, "SEEK ", 5)) {
         handle_seek(ctrl, line + 5);
-    } else if (!strcmp(line, "SET_CUE")) {
-        handle_set_cue(ctrl);
+    } else if (!strncmp(line, "SET_CUE ", 8)) {
+        handle_set_cue(ctrl, line + 8);
     } else if (!strcmp(line, "GOTO_CUE")) {
         handle_goto_cue(ctrl);
     } else if (!strcmp(line, "PLAY_CUE")) {

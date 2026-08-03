@@ -442,22 +442,40 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
 }
 
 /*
- * Pi DVS: store the current position as the cue point (owner's spec,
- * 2026-08-03) - SET_CUE. Position-space (offset already applied),
+ * Pi DVS: store an explicit elapsed-time offset as the cue point
+ * (owner's spec, 2026-08-03) - SET_CUE. Takes the target directly
+ * rather than always using the CURRENT position (the original design)
+ * - the app needs to be able to snap a cue point to the nearest beat-
+ * grid tick before storing it, and xwax itself has no notion of tempo/
+ * bars to do that snapping here (same "the caller decides the range,
+ * xwax just applies it" reasoning as player_set_loop()'s own doc
+ * comment). Position-space internally (offset already applied),
  * matching player_set_loop()'s own loop_start/loop_end convention, so
  * player_cue()/player_cue_play() below never need to repeat that
- * arithmetic. Reads `position` unlocked - matching player_recue()'s
- * own established pattern elsewhere in this file (only WRITES to
- * `position` need the lock, to stay coherent with player_collect()'s
- * own concurrent read while building audio).
+ * arithmetic.
  *
  * Plain field write, not lock-protected - called from handle_set_cue(),
  * already on the realtime thread itself, same reasoning as
  * player_set_loop()/player_set_relative_mode() above.
  */
-void player_set_cue_point(struct player *pl)
+void player_set_cue_point(struct player *pl, double elapsed_seconds)
 {
-    pl->cue_point = pl->position;
+    pl->cue_point = pl->offset + elapsed_seconds;
+}
+
+/*
+ * Pi DVS: the cue point's own elapsed-time value (owner's spec,
+ * 2026-08-03) - reported back via STATUS so the app can draw a cue
+ * marker without needing to track what it last set client-side (which
+ * would go stale across a reconnect, or across leaving and re-entering
+ * relative mode - see server/src/deck-status-poller.js's own doc
+ * comment on why STATUS fields generally get read back rather than
+ * tracked locally). Reads `cue_point`/`offset` unlocked, same
+ * reasoning as player_get_elapsed() elsewhere in this file.
+ */
+double player_get_cue_point_elapsed(struct player *pl)
+{
+    return pl->cue_point - pl->offset;
 }
 
 /*

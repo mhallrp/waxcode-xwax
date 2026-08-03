@@ -156,7 +156,8 @@ void player_recue(struct player *pl);
  * these write `position` directly instead, the same approach
  * player_cue_to_start() already used safely. */
 void player_seek_to_elapsed(struct player *pl, double elapsed_seconds);
-void player_set_cue_point(struct player *pl);
+void player_set_cue_point(struct player *pl, double elapsed_seconds);
+double player_get_cue_point_elapsed(struct player *pl);
 void player_cue(struct player *pl);
 void player_cue_play(struct player *pl);
 
