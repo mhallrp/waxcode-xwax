@@ -18,31 +18,8 @@
  */
 
 /*
- * Pi DVS control socket - Phase 2 fork proof-of-concept.
- *
- * Follows the same struct controller pattern as dicer.c (the
- * Novation Dicer MIDI controller): a controller owns file
- * descriptor(s), gets polled by the realtime thread alongside every
- * audio device, and acts on its assigned deck when data arrives.
- *
- * IMPORTANT #1: controller_handle() calls realtime() on EVERY
- * registered controller on EVERY poll() wakeup, regardless of which
- * fd actually became ready (see realtime.c's rt_main loop) - so both
- * the listening socket and any connected client socket MUST be
- * non-blocking. A blocking read here would stall the entire realtime
- * thread, freezing audio on every deck, not just this one.
- *
- * IMPORTANT #2, found by actually running this against real
- * hardware: deck_load() is NOT safe to call from the realtime thread
- * either. It leads into track.c's more_space(), which calls
- * rt_not_allowed() and aborts the whole process if invoked there
- * (xwax's own deliberate assertion against exactly this mistake -
- * see thread.c). In the stock interface, deck_load() is only ever
- * called from the SDL interface thread, a separate, non-realtime
- * thread - never from here. So the actual load is handed off to a
- * dedicated worker thread this file owns; realtime() only ever does
- * a strdup() (safe - not one of xwax's own guarded functions) and a
- * condvar signal, never the load itself.
+ * Pi DVS per-deck control socket, mirrors dicer.c's controller pattern.
+ * Sockets must stay non-blocking; LOAD/UNLOAD hand off to a worker thread since deck_load()/free() aren't realtime-safe (thread.c).
  */
 
 #include <errno.h>
@@ -72,7 +49,7 @@ struct control {
     char buf[MAX_LINE];
     size_t fill;
 
-    /* Hand-off to the worker thread - see IMPORTANT #2 above */
+    /* Hand-off to the worker thread - see file header above */
     pthread_t worker;
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -92,18 +69,7 @@ static int add_deck(struct controller *c, struct deck *d)
     return 0;
 }
 
-/*
- * Runs on the dedicated worker thread ONLY - never the realtime
- * thread. Builds a record from a bare filepath, bypassing the
- * library/selector system entirely (this is the proof-of-concept
- * shortcut; a real LOAD would look up an existing library entry),
- * and loads it.
- *
- * record_clear() (library.c) only frees ->pathname and ->match, not
- * ->artist/->title - matching that here by using string literals for
- * artist/title rather than independent allocations, so nothing is
- * ever double-freed or leaked because of a mismatched assumption.
- */
+/* Worker thread only. Builds a bare-filepath record, skipping the library/selector lookup a real LOAD would use. */
 static void do_load(struct control *ctrl, char *path)
 {
     struct record *re;
@@ -124,15 +90,7 @@ static void do_load(struct control *ctrl, char *path)
     deck_load(ctrl->deck, re);
 }
 
-/*
- * Same worker-thread requirement as do_load() above - deck_unload()
- * ends up calling track_release() on whatever track was previously
- * loaded, which calls free() once its refcount reaches zero. free()
- * is just as unsafe on the realtime thread as the malloc() in
- * do_load() is (see IMPORTANT #2), so this can't be handled directly
- * from realtime() either, even though - unlike LOAD - it doesn't look
- * like it should need it at first glance.
- */
+/* Worker thread only, same as do_load() - deck_unload() can call free() via track_release(). */
 static void do_unload(struct control *ctrl)
 {
     fprintf(stderr, "control: UNLOAD\n");
@@ -170,12 +128,7 @@ static void *worker_main(void *arg)
     }
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), below). Must
- * stay non-blocking and must never touch xwax's guarded functions -
- * see IMPORTANT #2 at the top of this file. Only hands off a copy of
- * the path to the worker thread.
- */
+/* Realtime thread - must stay non-blocking, only hands the path off to the worker thread. */
 static void handle_load(struct control *ctrl, const char *path)
 {
     char *copy;
@@ -202,12 +155,7 @@ static void handle_load(struct control *ctrl, const char *path)
     pthread_mutex_unlock(&ctrl->lock);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), below) - same
- * constraints as handle_load() above, and for the same reason: see
- * do_unload()'s doc comment for why UNLOAD needs the worker thread
- * hand-off too, even though it has no path argument to copy.
- */
+/* Realtime thread, same worker hand-off as handle_load(). */
 static void handle_unload(struct control *ctrl)
 {
     if (ctrl->deck == NULL) {
@@ -225,28 +173,10 @@ static void handle_unload(struct control *ctrl)
     pthread_mutex_unlock(&ctrl->lock);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same constraints as handle_load() above. Unlike
- * LOAD, this reads state and replies synchronously rather than
- * handing off to the worker thread: player_get_remain()/
- * player_is_active() are plain field reads (see player.c), not one
- * of xwax's guarded, non-realtime-safe functions like deck_load() -
- * confirmed by xwax's own stock SDL interface (interface.c) calling
- * these same two functions directly from its UI thread with no lock,
- * which this follows.
- *
- * ctrl->deck->record is &no_record (deck.c, not exposed outside it)
- * until a real LOAD succeeds - checking ->pathname != NULL rather
- * than importing that static is enough to tell "nothing loaded yet"
- * apart from a real track, since no_record leaves pathname at its
- * zero-initialised NULL.
- */
+/* Realtime thread - safe to answer synchronously, these are all plain field reads (see player.c). */
 static void handle_status(struct control *ctrl)
 {
-    /* Sized for a real filesystem path, not just the fixed-format
-     * state/remain fields - PATH_MAX on Linux is 4096, plus room for
-     * "STATUS PLAYING 12345.6 " and the trailing newline. */
+    /* PATH_MAX (4096) plus room for the fixed-format fields and newline. */
     char reply[4200];
     const char *state;
     double remain;
@@ -258,52 +188,11 @@ static void handle_status(struct control *ctrl)
     }
 
     if (ctrl->deck->record->pathname == NULL) {
-        /* No path field at all when nothing's loaded - there's nothing
-         * meaningful to report, and it keeps this, the common idle
-         * case, a fixed, simple shape. pitch is meaningless here too -
-         * fixed 0.000, same reasoning as remain below. relative
-         * (added 2026-08-01) is fixed 0 here too - relative mode can't
-         * be meaningfully on for an empty deck. cuePoint (added
-         * 2026-08-03) is fixed 0.000 too, same reasoning. loopActive/
-         * loopStart/loopEnd (added 2026-08-04) are fixed 0/0.000/0.000,
-         * same reasoning again - there's nothing to loop on an empty
-         * deck. */
+        /* Nothing loaded - pitch/relative/cue/loop fixed at zero, keeps EMPTY a simple fixed shape. */
         n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000 0.000\n");
     } else if (track_is_importing(ctrl->deck->player.track)) {
-        /* A LOAD was issued, but xwax's own import subprocess (see
-         * track.c) is still decoding the file - track->length only
-         * reflects however much has been decoded SO FAR, not the
-         * eventual full duration, so player_get_remain() would report
-         * a real but meaningless, steadily-growing number here.
-         * Confirmed as a real, confusing thing to show on real
-         * hardware: the app's countdown would start at some small,
-         * wrong value and visibly "snap" to the correct one once
-         * import finished, for every single load, with no needle
-         * involved at all - purely an import-progress artifact, not
-         * anything to do with timecode. Reporting a distinct state
-         * instead lets a client show "loading" honestly rather than a
-         * number it can't yet trust. remain/pitch are meaningless
-         * here, sent as fixed 0.0/0.000 for a consistent reply shape;
-         * path is still included so a client already knows which file
-         * this is.
-         *
-         * relative is NOT fixed here, unlike remain/pitch - confirmed
-         * as a real bug on real hardware (2026-08-01): player_set_track()
-         * never touches relative_mode, so a deck already in relative
-         * mode stays in it straight through a new load, same as any
-         * other in-progress state. Hardcoding 0 here made the app's
-         * mode icon visibly flicker to Absolute and back for every
-         * single load while a deck was in Relative - not a meaningless
-         * import artifact like remain/pitch, a real, current, simply
-         * wrong value.
-         *
-         * cuePoint (added 2026-08-03) IS fixed here, unlike relative -
-         * a fresh load always resets it to the new track's own start
-         * (see player_set_track()), so there's nothing stale to
-         * preserve the way there was for relative_mode. loopActive/
-         * loopStart/loopEnd (added 2026-08-04) are fixed too, same
-         * reasoning as cuePoint - player_set_track() clears loop_active
-         * on every fresh load. */
+        /* Import in progress - remain/pitch fixed (track->length isn't final yet). relative stays
+         * LIVE, not fixed - see DEVLOG.md 2026-08-01 for the real bug that happens if it's fixed. */
         n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %s\n",
                      ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
     } else {
@@ -311,60 +200,8 @@ static void handle_status(struct control *ctrl)
         if (remain < 0.0)
             remain = 0.0;
         state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
-        /* The path is what lets a client (Node, then the app) recover
-         * "what's actually loaded on this deck" after ITS OWN restart
-         * - xwax is the one component that keeps running (and keeps
-         * the real answer) through a Node or app restart, so it's the
-         * only place this can authoritatively come from. Last field,
-         * unquoted - a path can contain spaces, but never a newline,
-         * so "everything to end of line" is an unambiguous way for a
-         * client to extract it without needing real escaping.
-         *
-         * pitch (added 2026-07-27): struct player's own field, read
-         * directly with no lock - exactly how player_is_active() just
-         * read it one line above to decide `state`. Lets a client
-         * interpolate position accurately between polls (real speed
-         * and direction, not an assumed steady 1x forward guess).
-         *
-         * remain now %.4f, not the original %.1f (same day) - the
-         * underlying player_get_remain() was always a fully precise
-         * double; %.1f only ever rounded it for display, but a client
-         * re-anchoring its own pitch-based interpolation to this value
-         * on every poll (250ms) was inheriting that rounding as a real,
-         * visible position snap each time - up to ~50ms of error,
-         * corrected abruptly every tick. Confirmed as a real
-         * contributor to "not smooth" playback/scrub feel on real
-         * hardware, even with pitch-based interpolation already in
-         * place.
-         *
-         * relative (added 2026-08-01): struct player's own
-         * relative_mode field, read the same direct/lock-free way
-         * pitch is - lets a client show whether this deck's needle
-         * currently drives live scratch/pitch only, or full absolute
-         * position too (see player.h's own doc comment on the
-         * feature). 0/1, not a word, to stay consistent with the
-         * fixed-width numeric fields either side of it.
-         *
-         * cuePoint (added 2026-08-03): player_get_cue_point_elapsed(),
-         * same elapsed-time convention as remain - reported back
-         * rather than left for the app to track client-side (which
-         * would go stale across a reconnect, or across leaving and
-         * re-entering relative mode, tearing down that view's own
-         * @State) so the app can draw a real cue marker on the
-         * waveform that's always in sync with the box's own actual
-         * cue point, the same "read it back from STATUS" idiom
-         * relative/pitch/remain already use.
-         *
-         * loopActive/loopStart/loopEnd (added 2026-08-04): player_get_
-         * loop_active()/player_get_loop_start_elapsed()/player_get_
-         * loop_end_elapsed() - same "read it back" idiom as cuePoint
-         * just above, fixing a real bug where the app's own loop-
-         * active flag was pure client state with nothing to read it
-         * back from, so a restart mid-loop showed no loop indication
-         * at all while xwax kept faithfully looping underneath it.
-         * loopStart/loopEnd are 0.000 whenever loopActive is 0, same
-         * "meaningless while inactive" convention as cuePoint's own
-         * EMPTY/IMPORTING fields. */
+        /* Precision fields (pitch/relative/cuePoint/loop) are read back live, not client-tracked,
+         * so scrub/loop/cue stay in sync across a reconnect - see DEVLOG.md for the full history. */
         n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
@@ -380,25 +217,12 @@ static void handle_status(struct control *ctrl)
         return;
     }
 
-    /* Non-blocking socket (see IMPORTANT #1), tiny fixed-size reply -
-     * a short write() rather than a buffered/retrying send loop, same
-     * complexity level as the rest of this proof-of-concept protocol.
-     * Node reconnects and asks again on its own polling interval (see
-     * deck-control.js), so a dropped reply here just costs one tick,
-     * not a stuck client. */
+    /* Short, non-blocking write - a dropped reply just costs Node one poll tick, not a stuck client. */
     if (write(ctrl->client_fd, reply, (size_t)n) == -1)
         perror("control: write STATUS reply");
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - unlike LOAD/UNLOAD, this is safe to do directly
- * here rather than handing off to the worker thread: player_set_
- * relative_mode() is a couple of plain field writes (see player.c),
- * not one of xwax's guarded, non-realtime-safe functions - same
- * reasoning as handle_status() below already relies on for its own
- * direct field reads.
- */
+/* Realtime thread - safe directly, player_set_relative_mode() is a plain field write. */
 static void handle_relative(struct control *ctrl, bool on)
 {
     if (ctrl->deck == NULL) {
@@ -410,12 +234,7 @@ static void handle_relative(struct control *ctrl, bool on)
     player_set_relative_mode(&ctrl->deck->player, on);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_relative() above:
- * player_seek_to_elapsed() is a lock-protected plain field write, not
- * one of xwax's guarded, non-realtime-safe functions.
- */
+/* Realtime thread - safe directly, player_seek_to_elapsed() is a plain field write. */
 static void handle_seek(struct control *ctrl, const char *args)
 {
     double seconds;
@@ -434,14 +253,7 @@ static void handle_seek(struct control *ctrl, const char *args)
     player_seek_to_elapsed(&ctrl->deck->player, seconds);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_seek() above:
- * player_set_cue_point() is a plain field write. Takes an explicit
- * target rather than always using the deck's current position - see
- * player_set_cue_point()'s own doc comment for why (beat-grid
- * snapping happens app-side, xwax has no notion of tempo/bars).
- */
+/* Realtime thread, safe directly. Explicit target, not "current position" - beat-grid snapping happens app-side. */
 static void handle_set_cue(struct control *ctrl, const char *args)
 {
     double seconds;
@@ -460,11 +272,7 @@ static void handle_set_cue(struct control *ctrl, const char *args)
     player_set_cue_point(&ctrl->deck->player, seconds);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_seek() above:
- * player_cue() is a lock-protected plain field write.
- */
+/* Realtime thread - safe directly, player_cue() is a plain field write. */
 static void handle_goto_cue(struct control *ctrl)
 {
     if (ctrl->deck == NULL) {
@@ -476,11 +284,7 @@ static void handle_goto_cue(struct control *ctrl)
     player_cue(&ctrl->deck->player);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_seek() above:
- * player_cue_play() is a lock-protected plain field write.
- */
+/* Realtime thread - safe directly, player_cue_play() is a plain field write. */
 static void handle_play_cue(struct control *ctrl)
 {
     if (ctrl->deck == NULL) {
@@ -492,12 +296,7 @@ static void handle_play_cue(struct control *ctrl)
     player_cue_play(&ctrl->deck->player);
 }
 
-/*
- * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_relative()/handle_goto_cue()
- * above: player_set_loop()/player_clear_loop() are plain field
- * writes, not one of xwax's guarded, non-realtime-safe functions.
- */
+/* Realtime thread - safe directly, player_set_loop()/player_clear_loop() are plain field writes. */
 static void handle_loop(struct control *ctrl, const char *args)
 {
     double start, end;
@@ -556,10 +355,7 @@ static void close_client(struct control *ctrl)
     ctrl->fill = 0;
 }
 
-/*
- * Drain every pending connection on the listening socket. Non-blocking
- * (see IMPORTANT #1) - loops until accept() would block.
- */
+/* Drains every pending connection; loops until accept() would block (non-blocking socket). */
 static void accept_clients(struct control *ctrl)
 {
     for (;;) {
@@ -587,10 +383,7 @@ static void accept_clients(struct control *ctrl)
     }
 }
 
-/*
- * Drain everything currently available on the client socket.
- * Non-blocking (see IMPORTANT #1) - loops until read() would block.
- */
+/* Drains everything available; loops until read() would block (non-blocking socket). */
 static void read_client(struct control *ctrl)
 {
     for (;;) {

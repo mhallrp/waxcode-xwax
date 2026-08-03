@@ -37,12 +37,7 @@ struct player {
 
     double position, /* seconds */
         target_position, /* seconds, or TARGET_UNKNOWN */
-        offset, /* track start point in timecode - see player_init()'s
-                 * cue_offset parameter. Fixed for the life of the
-                 * player once set; never adjusted again after init (in
-                 * particular, calibrate_to_timecode_position() in
-                 * player.c deliberately does not touch it - see that
-                 * function's own comment) */
+        offset, /* track start point in timecode - fixed for the life of the player, never adjusted after init */
         last_difference, /* last known position minus target_position */
         pitch, /* from timecoder */
         sync_pitch, /* pitch required to sync to timecode signal */
@@ -53,72 +48,14 @@ struct player {
     struct timecoder *timecoder;
     bool timecode_control,
         recalibrate, /* re-sync offset at next opportunity */
-        /* Pi DVS: whether the timecoder currently has a genuinely
-         * valid, locked absolute position (needle down and reading,
-         * see timecoder_get_position()'s -1 sentinel) - NOT the same
-         * thing as `pitch` being near zero, which is also true for a
-         * needle resting stationary on a still-valid position (paused,
-         * not lifted). Updated every real-time buffer inside
-         * sync_to_timecode(), read (lock-free, same established
-         * pattern as `pitch` elsewhere - see control.c's STATUS reply)
-         * by player_set_track() on the LOAD worker thread to decide
-         * whether a fresh load should start at track position 0
-         * rather than silently inheriting wherever the timecode
-         * happened to leave off from whatever was loaded before. */
-        timecode_valid,
-        /* Pi DVS: "relative mode" (owner's spec, 2026-08-01) - unlike
-         * timecode_control's absolute mode, the needle still drives
-         * live pitch/scratch while it's down (see
-         * sync_to_timecode_relative() in player.c), but its absolute
-         * position is never consulted, so lifting the needle simply
-         * leaves the track playing rather than stopping it. Checked
-         * ahead of timecode_control in player_collect() - an
-         * independent override, not a variant of the existing
-         * absolute/internal binary, so that binary's own behaviour
-         * stays provably unchanged for the (currently unused, but not
-         * removed) case where something else still relies on it.
-         * Returning to absolute mode is a plain position snap using
-         * the SAME recalibrate/calibrate_to_timecode_position() path
-         * timecode_control already uses when re-enabled from off -
-         * see player_set_relative_mode() - deliberately not the
-         * offset-preserving continuity an earlier design of this
-         * feature considered and the owner decided against. */
-        relative_mode,
-        /* Pi DVS: set on every fresh player_set_track() load, cleared
-         * the first time sync_to_timecode_relative() sees a genuinely
-         * valid reading since that load. While set AND the needle
-         * isn't currently valid, pitch is held at 0 (paused) instead
-         * of relative mode's usual "lift the needle, keep playing" 1.0
-         * - owner's spec, 2026-08-01: a freshly loaded track
-         * inheriting whatever pitch the PREVIOUS track happened to be
-         * moving at (eg. immediately auto-playing because the needle
-         * was lifted and idling at 1.0 before this load) is a real
-         * bug, not the intended "keep playing" behaviour, which is
-         * only meant to apply once THIS track has actually had a real
-         * needle reading at least once. Irrelevant outside relative
-         * mode - only ever consulted from
-         * sync_to_timecode_relative(). */
-        relative_awaiting_signal,
-        /* Pi DVS: a loop is active between [loop_start, loop_end)
-         * below (owner's spec, 2026-08-02) - see player_set_loop()'s
-         * own doc comment. Only ever consulted from player_collect(),
-         * and only while relative_mode is also on - absolute mode's
-         * position is dictated by the physical needle, there's
-         * nothing here to loop against. */
-        loop_active;
+        timecode_valid, /* needle down and reading a valid locked position - not the same as pitch~=0, which is also true when paused */
+        relative_mode, /* needle drives live pitch/scratch but its absolute position is never consulted - see PROTOCOL.md's RELATIVE */
+        relative_awaiting_signal, /* true from a fresh load until the needle's first valid reading - holds pitch at 0 instead of relative mode's usual "lift needle, keep playing" 1.0, so a new load doesn't inherit the previous track's pitch */
+        loop_active; /* [loop_start, loop_end) below - only consulted while relative_mode is also on */
 
-    double loop_start, loop_end; /* seconds, position-space (already
-                                   * offset-adjusted) - valid only
-                                   * while loop_active */
+    double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
-    /* Pi DVS: a single, settable cue point (owner's spec, 2026-08-03) -
-     * see player_set_cue_point()/player_cue()/player_cue_play()'s own
-     * doc comments. Position-space (offset already applied), matching
-     * loop_start/loop_end's own convention. Defaults to `offset` (the
-     * track's own start point) at init and on every fresh load - see
-     * player_init()/player_set_track() - so CUE/CUE_PLAY do something
-     * sensible ("go to the start") even before SET is ever pressed. */
-    double cue_point;
+    double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
@@ -134,15 +71,7 @@ void player_set_relative_mode(struct player *pl, bool on);
 void player_set_loop(struct player *pl, double start_seconds, double end_seconds);
 void player_clear_loop(struct player *pl);
 
-/* Pi DVS (owner's spec, 2026-08-04): reported back via STATUS, same
- * "read it back rather than track it locally" idiom as cue_point above
- * - a client-tracked loop-active flag goes stale across a reconnect
- * (confirmed as a real, confusing bug on real hardware: the app
- * restarted mid-loop, showed no loop indication at all, while xwax
- * kept faithfully looping underneath it). All three are 0/0.000/0.000
- * whenever loop_active is false, matching cue_point's own "meaningless
- * while inactive" convention rather than reporting a stale leftover
- * range. */
+/* Reported back via STATUS (see PROTOCOL.md) - 0/0.000/0.000 whenever loop_active is false. */
 bool player_get_loop_active(struct player *pl);
 double player_get_loop_start_elapsed(struct player *pl);
 double player_get_loop_end_elapsed(struct player *pl);
@@ -158,16 +87,7 @@ bool player_is_active(const struct player *pl);
 void player_seek_to(struct player *pl, double seconds);
 void player_recue(struct player *pl);
 
-/* Pi DVS (owner's spec, 2026-08-03): a single settable cue point,
- * replacing the earlier fixed "cue to start" (player_cue_to_start(),
- * retired) - see each function's own doc comment in player.c. NOT
- * built on the upstream cue-points system already present in deck.c/
- * cues.c (deck_cue() et al) - that mechanism works by mutating
- * `offset` dynamically, which conflicts directly with this fork's own
- * "offset never changes after init" invariant (see struct player's own
- * doc comment on `offset`, and calibrate_to_timecode_position()'s) -
- * these write `position` directly instead, the same approach
- * player_cue_to_start() already used safely. */
+/* Single settable cue point - see PROTOCOL.md. Writes `position` directly rather than mutating `offset` (deck.c/cues.c's upstream cue system does the latter, which conflicts with this fork's "offset never changes after init" invariant). */
 void player_seek_to_elapsed(struct player *pl, double elapsed_seconds);
 void player_set_cue_point(struct player *pl, double elapsed_seconds);
 double player_get_cue_point_elapsed(struct player *pl);
