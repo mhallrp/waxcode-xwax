@@ -41,17 +41,18 @@ struct rt;
  *                    both drive the same output at once. No reply;
  *                    a following STATUS will show EMPTY once it's
  *                    taken effect.
- *   STATUS        - reply with "STATUS EMPTY 0.0 0.000 0 0.000\n" if
- *                    nothing's loaded, "STATUS IMPORTING 0.0 0.000 0
- *                    0.000 <path>\n" if a LOAD was issued but xwax's own
- *                    import subprocess is still decoding it (see
- *                    track_is_importing() - track->length only reflects
- *                    however much has decoded SO FAR during this window,
- *                    so remain would otherwise be a real but
- *                    meaningless, steadily-growing number, confirmed as
- *                    a real, confusing thing to show on real hardware),
- *                    or "STATUS <PLAYING|STOPPED> <remain> <pitch>
- *                    <relative> <cuePoint> <path>\n" once import's done.
+ *   STATUS        - reply with "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000
+ *                    0.000\n" if nothing's loaded, "STATUS IMPORTING 0.0
+ *                    0.000 0 0.000 0 0.000 0.000 <path>\n" if a LOAD was
+ *                    issued but xwax's own import subprocess is still
+ *                    decoding it (see track_is_importing() - track->
+ *                    length only reflects however much has decoded SO
+ *                    FAR during this window, so remain would otherwise
+ *                    be a real but meaningless, steadily-growing number,
+ *                    confirmed as a real, confusing thing to show on
+ *                    real hardware), or "STATUS <PLAYING|STOPPED>
+ *                    <remain> <pitch> <relative> <cuePoint> <loopActive>
+ *                    <loopStart> <loopEnd> <path>\n" once import's done.
  *                    <remain> is seconds left in the loaded track,
  *                    clamped to >= 0. PLAYING/STOPPED reflects player_is_
  *                    active() - whether the platter's currently spinning
@@ -79,7 +80,14 @@ struct rt;
  *                    than tracking what it last sent client-side (which
  *                    would go stale across a reconnect - see SET_CUE
  *                    below). Fixed 0.000 for EMPTY/IMPORTING, same
- *                    reasoning as pitch. <path> is the loaded file's
+ *                    reasoning as pitch. <loopActive>/<loopStart>/
+ *                    <loopEnd> (added 2026-08-04) are player_get_loop_
+ *                    active()/player_get_loop_start_elapsed()/player_
+ *                    get_loop_end_elapsed() - same "read it back" idiom
+ *                    as cuePoint just above (see LOOP below for why a
+ *                    client can no longer just track this itself).
+ *                    <loopStart>/<loopEnd> are 0.000 whenever
+ *                    <loopActive> is 0. <path> is the loaded file's
  *                    path, unquoted and always the last field (may
  *                    contain spaces, never a newline) - lets a client
  *                    recover "what's actually loaded on this deck" after
@@ -179,9 +187,21 @@ struct rt;
  *   LOOP OFF      - stop looping (see player_clear_loop()) - playback
  *                    continues from wherever the loop currently is,
  *                    no jump. No reply either way - same "read it back
- *                    from STATUS" idiom as RELATIVE/CUE above, though
- *                    LOOP has no STATUS field of its own (a client
- *                    that set the loop already knows it's active).
+ *                    from STATUS" idiom as RELATIVE/CUE above; STATUS's
+ *                    own <loopActive>/<loopStart>/<loopEnd> fields
+ *                    (added 2026-08-04, see STATUS above) are what a
+ *                    client reads this back from - a client-tracked
+ *                    flag with nothing to read it back from went stale
+ *                    across a reconnect (a real, confirmed bug: the app
+ *                    restarted mid-loop, showed no loop indication,
+ *                    while xwax kept faithfully looping underneath it).
+ *                    SEEK/GOTO_CUE/PLAY_CUE above all implicitly clear
+ *                    an active loop too (see player_jump_to_position()/
+ *                    player_cue_play()'s own doc comments) - a
+ *                    deliberate reposition landing outside the loop's
+ *                    own range used to fight player_collect()'s own
+ *                    loop wraparound every buffer, confirmed as a real,
+ *                    disorienting bug on real hardware.
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 

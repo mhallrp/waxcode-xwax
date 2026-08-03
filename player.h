@@ -134,6 +134,19 @@ void player_set_relative_mode(struct player *pl, bool on);
 void player_set_loop(struct player *pl, double start_seconds, double end_seconds);
 void player_clear_loop(struct player *pl);
 
+/* Pi DVS (owner's spec, 2026-08-04): reported back via STATUS, same
+ * "read it back rather than track it locally" idiom as cue_point above
+ * - a client-tracked loop-active flag goes stale across a reconnect
+ * (confirmed as a real, confusing bug on real hardware: the app
+ * restarted mid-loop, showed no loop indication at all, while xwax
+ * kept faithfully looping underneath it). All three are 0/0.000/0.000
+ * whenever loop_active is false, matching cue_point's own "meaningless
+ * while inactive" convention rather than reporting a stale leftover
+ * range. */
+bool player_get_loop_active(struct player *pl);
+double player_get_loop_start_elapsed(struct player *pl);
+double player_get_loop_end_elapsed(struct player *pl);
+
 void player_set_track(struct player *pl, struct track *track);
 void player_clone(struct player *pl, const struct player *from);
 

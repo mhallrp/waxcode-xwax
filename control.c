@@ -264,8 +264,11 @@ static void handle_status(struct control *ctrl)
          * fixed 0.000, same reasoning as remain below. relative
          * (added 2026-08-01) is fixed 0 here too - relative mode can't
          * be meaningfully on for an empty deck. cuePoint (added
-         * 2026-08-03) is fixed 0.000 too, same reasoning. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000\n");
+         * 2026-08-03) is fixed 0.000 too, same reasoning. loopActive/
+         * loopStart/loopEnd (added 2026-08-04) are fixed 0/0.000/0.000,
+         * same reasoning again - there's nothing to loop on an empty
+         * deck. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000 0.000\n");
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* A LOAD was issued, but xwax's own import subprocess (see
          * track.c) is still decoding the file - track->length only
@@ -297,8 +300,11 @@ static void handle_status(struct control *ctrl)
          * cuePoint (added 2026-08-03) IS fixed here, unlike relative -
          * a fresh load always resets it to the new track's own start
          * (see player_set_track()), so there's nothing stale to
-         * preserve the way there was for relative_mode. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 %s\n",
+         * preserve the way there was for relative_mode. loopActive/
+         * loopStart/loopEnd (added 2026-08-04) are fixed too, same
+         * reasoning as cuePoint - player_set_track() clears loop_active
+         * on every fresh load. */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %s\n",
                      ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
@@ -347,11 +353,26 @@ static void handle_status(struct control *ctrl)
          * @State) so the app can draw a real cue marker on the
          * waveform that's always in sync with the box's own actual
          * cue point, the same "read it back from STATUS" idiom
-         * relative/pitch/remain already use. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %s\n",
+         * relative/pitch/remain already use.
+         *
+         * loopActive/loopStart/loopEnd (added 2026-08-04): player_get_
+         * loop_active()/player_get_loop_start_elapsed()/player_get_
+         * loop_end_elapsed() - same "read it back" idiom as cuePoint
+         * just above, fixing a real bug where the app's own loop-
+         * active flag was pure client state with nothing to read it
+         * back from, so a restart mid-loop showed no loop indication
+         * at all while xwax kept faithfully looping underneath it.
+         * loopStart/loopEnd are 0.000 whenever loopActive is 0, same
+         * "meaningless while inactive" convention as cuePoint's own
+         * EMPTY/IMPORTING fields. */
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
-                     player_get_cue_point_elapsed(&ctrl->deck->player), ctrl->deck->record->pathname);
+                     player_get_cue_point_elapsed(&ctrl->deck->player),
+                     player_get_loop_active(&ctrl->deck->player) ? 1 : 0,
+                     player_get_loop_start_elapsed(&ctrl->deck->player),
+                     player_get_loop_end_elapsed(&ctrl->deck->player),
+                     ctrl->deck->record->pathname);
     }
 
     if (n < 0 || (size_t)n >= sizeof reply) {

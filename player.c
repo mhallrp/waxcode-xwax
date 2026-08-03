@@ -425,6 +425,20 @@ static void player_jump_to_position(struct player *pl, double to)
     }
     if (!pl->timecode_valid)
         pl->relative_awaiting_signal = true;
+
+    /* Pi DVS (owner-reported, 2026-08-04): "if I am in a loop and
+     * press the cue button it loses its mind a bit... the loop is
+     * trying to take control of the position" - exactly right.
+     * player_collect()'s own loop wraparound runs unconditionally
+     * every buffer while loop_active, with no notion of "this
+     * position change was deliberate" - a SEEK/GOTO_CUE landing
+     * outside [loop_start, loop_end) got yanked straight back inside
+     * the loop on the very next buffer, fighting the jump. An
+     * explicit reposition ending an active loop is also just the
+     * standard DJ-hardware expectation (hitting a hot cue exits a
+     * loop on real CDJs/controllers too), not merely a bug-avoidance
+     * measure. */
+    player_clear_loop(pl);
 }
 
 /*
@@ -479,6 +493,35 @@ double player_get_cue_point_elapsed(struct player *pl)
 }
 
 /*
+ * Pi DVS: the active loop's own state, reported back via STATUS
+ * (owner's spec, 2026-08-04) - same "read it back rather than track it
+ * locally" idiom as player_get_cue_point_elapsed() above, fixing a
+ * real bug: the app's own loop-active flag was pure client @State with
+ * nothing to read it back FROM, so it silently went stale (always
+ * false) across an app restart while xwax kept faithfully looping
+ * underneath it - confusing, and left the loop's own green waveform
+ * highlight missing despite the loop still very much being active.
+ * Start/end fixed at 0.000 whenever inactive, matching cue_point's own
+ * "meaningless while inactive" convention, rather than reporting
+ * whatever range happened to be set last. Reads unlocked, same
+ * reasoning as player_get_cue_point_elapsed() above.
+ */
+bool player_get_loop_active(struct player *pl)
+{
+    return pl->loop_active;
+}
+
+double player_get_loop_start_elapsed(struct player *pl)
+{
+    return pl->loop_active ? pl->loop_start - pl->offset : 0.0;
+}
+
+double player_get_loop_end_elapsed(struct player *pl)
+{
+    return pl->loop_active ? pl->loop_end - pl->offset : 0.0;
+}
+
+/*
  * Pi DVS: jump to the stored cue point and pause there (owner's spec,
  * 2026-08-03) - GOTO_CUE, replacing the old fixed player_cue_to_start()
  * (which this now subsumes: `cue_point` defaults to the track's own
@@ -516,6 +559,12 @@ void player_cue_play(struct player *pl)
         spin_unlock(&pl->lock);
     }
     pl->relative_awaiting_signal = false;
+
+    /* Pi DVS (2026-08-04): same reasoning as player_jump_to_position()'s
+     * own doc comment - this is a deliberate reposition too, and
+     * doesn't route through that shared helper (see this function's
+     * own doc comment above for why), so it needs its own call. */
+    player_clear_loop(pl);
 }
 
 /*
