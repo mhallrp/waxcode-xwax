@@ -110,6 +110,15 @@ struct player {
     double loop_start, loop_end; /* seconds, position-space (already
                                    * offset-adjusted) - valid only
                                    * while loop_active */
+
+    /* Pi DVS: a single, settable cue point (owner's spec, 2026-08-03) -
+     * see player_set_cue_point()/player_cue()/player_cue_play()'s own
+     * doc comments. Position-space (offset already applied), matching
+     * loop_start/loop_end's own convention. Defaults to `offset` (the
+     * track's own start point) at init and on every fresh load - see
+     * player_init()/player_set_track() - so CUE/CUE_PLAY do something
+     * sensible ("go to the start") even before SET is ever pressed. */
+    double cue_point;
 };
 
 void player_init(struct player *pl, unsigned int sample_rate,
@@ -135,7 +144,21 @@ bool player_is_active(const struct player *pl);
 
 void player_seek_to(struct player *pl, double seconds);
 void player_recue(struct player *pl);
-void player_cue_to_start(struct player *pl);
+
+/* Pi DVS (owner's spec, 2026-08-03): a single settable cue point,
+ * replacing the earlier fixed "cue to start" (player_cue_to_start(),
+ * retired) - see each function's own doc comment in player.c. NOT
+ * built on the upstream cue-points system already present in deck.c/
+ * cues.c (deck_cue() et al) - that mechanism works by mutating
+ * `offset` dynamically, which conflicts directly with this fork's own
+ * "offset never changes after init" invariant (see struct player's own
+ * doc comment on `offset`, and calibrate_to_timecode_position()'s) -
+ * these write `position` directly instead, the same approach
+ * player_cue_to_start() already used safely. */
+void player_seek_to_elapsed(struct player *pl, double elapsed_seconds);
+void player_set_cue_point(struct player *pl);
+void player_cue(struct player *pl);
+void player_cue_play(struct player *pl);
 
 void player_collect(struct player *pl, signed short *pcm, unsigned samples);
 

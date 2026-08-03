@@ -375,23 +375,78 @@ static void handle_relative(struct control *ctrl, bool on)
 /*
  * Runs on the realtime thread (called from realtime(), via
  * handle_line()) - same reasoning as handle_relative() above:
- * player_cue_to_start() is a lock-protected plain field write, not
+ * player_seek_to_elapsed() is a lock-protected plain field write, not
  * one of xwax's guarded, non-realtime-safe functions.
  */
-static void handle_cue(struct control *ctrl)
+static void handle_seek(struct control *ctrl, const char *args)
 {
+    double seconds;
+
     if (ctrl->deck == NULL) {
-        fprintf(stderr, "control: CUE received before a deck was assigned\n");
+        fprintf(stderr, "control: SEEK received before a deck was assigned\n");
         return;
     }
 
-    fprintf(stderr, "control: CUE\n");
-    player_cue_to_start(&ctrl->deck->player);
+    if (sscanf(args, "%lf", &seconds) != 1) {
+        fprintf(stderr, "control: malformed SEEK command '%s'\n", args);
+        return;
+    }
+
+    fprintf(stderr, "control: SEEK %.3f\n", seconds);
+    player_seek_to_elapsed(&ctrl->deck->player, seconds);
 }
 
 /*
  * Runs on the realtime thread (called from realtime(), via
- * handle_line()) - same reasoning as handle_relative()/handle_cue()
+ * handle_line()) - same reasoning as handle_seek() above:
+ * player_set_cue_point() is a plain field write.
+ */
+static void handle_set_cue(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: SET_CUE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: SET_CUE\n");
+    player_set_cue_point(&ctrl->deck->player);
+}
+
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_seek() above:
+ * player_cue() is a lock-protected plain field write.
+ */
+static void handle_goto_cue(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: GOTO_CUE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: GOTO_CUE\n");
+    player_cue(&ctrl->deck->player);
+}
+
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_seek() above:
+ * player_cue_play() is a lock-protected plain field write.
+ */
+static void handle_play_cue(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: PLAY_CUE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: PLAY_CUE\n");
+    player_cue_play(&ctrl->deck->player);
+}
+
+/*
+ * Runs on the realtime thread (called from realtime(), via
+ * handle_line()) - same reasoning as handle_relative()/handle_goto_cue()
  * above: player_set_loop()/player_clear_loop() are plain field
  * writes, not one of xwax's guarded, non-realtime-safe functions.
  */
@@ -427,8 +482,14 @@ static void handle_line(struct control *ctrl, char *line)
         handle_unload(ctrl);
     } else if (!strcmp(line, "STATUS")) {
         handle_status(ctrl);
-    } else if (!strcmp(line, "CUE")) {
-        handle_cue(ctrl);
+    } else if (!strncmp(line, "SEEK ", 5)) {
+        handle_seek(ctrl, line + 5);
+    } else if (!strcmp(line, "SET_CUE")) {
+        handle_set_cue(ctrl);
+    } else if (!strcmp(line, "GOTO_CUE")) {
+        handle_goto_cue(ctrl);
+    } else if (!strcmp(line, "PLAY_CUE")) {
+        handle_play_cue(ctrl);
     } else if (!strcmp(line, "RELATIVE ON")) {
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {

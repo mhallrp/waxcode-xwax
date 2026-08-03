@@ -98,14 +98,53 @@ struct rt;
  *                    reading, if it isn't already) - deliberately not
  *                    an offset-preserving continuation, owner's call.
  *
- *   CUE           - jump back to the track's own start point (see
- *                    player_cue_to_start()). Mainly for relative mode,
- *                    where there's no needle position to fall back on
- *                    to get back to the beginning, unlike absolute
- *                    mode. No reply - a client sees the jump reflected
- *                    in STATUS's own <remain> on the next poll, same
- *                    "read it back rather than track it locally" idiom
- *                    as RELATIVE above.
+ *   SEEK <seconds> - jump the playhead to an arbitrary elapsed-time
+ *                    offset within the track (same convention as
+ *                    STATUS's <remain>/LOOP's own start/end) and pause
+ *                    there - see player_seek_to_elapsed(). Mainly for
+ *                    relative mode: tap-to-seek and drag-to-position on
+ *                    the app's waveform. "Pause" here means the same
+ *                    thing it does for GOTO_CUE below - if the needle
+ *                    is down and providing a real reading, the jump
+ *                    just becomes the new position and playback
+ *                    continues following the live pitch as normal; only
+ *                    with the needle up does this actually hold still.
+ *                    No reply - a client sees the jump reflected in
+ *                    STATUS's own <remain> on the next poll, same "read
+ *                    it back rather than track it locally" idiom as
+ *                    RELATIVE above.
+ *
+ *   SET_CUE       - store the current position as this deck's single
+ *                    cue point (see player_set_cue_point()). Replaces
+ *                    whatever cue point was set before, if any. No
+ *                    reply - same idiom as SEEK above.
+ *
+ *   GOTO_CUE      - jump back to the stored cue point and pause there
+ *                    (see player_cue(), same pause semantics as SEEK
+ *                    above) - replaces the earlier fixed CUE command
+ *                    (jump to track start), which this now subsumes:
+ *                    the cue point defaults to the track's own start
+ *                    point until SET_CUE is ever sent (see struct
+ *                    player's own doc comment on `cue_point`), so this
+ *                    does exactly what the old CUE did before that.
+ *                    Mainly for relative mode, where there's no needle
+ *                    position to fall back on to get back to a cue
+ *                    point, unlike absolute mode. No reply - same idiom
+ *                    as SEEK above.
+ *
+ *   PLAY_CUE      - jump to the stored cue point and start playing FROM
+ *                    there immediately, even with the needle up and no
+ *                    real timecode signal present (see player_cue_
+ *                    play()) - a genuine digital/software-driven
+ *                    playback, unlike every other position command
+ *                    here, which pauses without a real needle signal.
+ *                    Reuses relative mode's own existing "lift the
+ *                    needle, keep playing" mechanism rather than a
+ *                    separate synthetic playback path - if the needle
+ *                    IS down and valid, its real reading takes over
+ *                    immediately as normal, this never fights a real,
+ *                    present signal. No reply - same idiom as SEEK
+ *                    above.
  *
  *   LOOP <start> <end> - loop the track's own elapsed-time range
  *                    [start, end) (seconds, same convention as

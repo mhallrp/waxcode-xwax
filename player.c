@@ -233,6 +233,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->loop_active = false;
     pl->loop_start = 0.0;
     pl->loop_end = 0.0;
+    pl->cue_point = pl->offset;
 
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
@@ -371,59 +372,132 @@ void player_recue(struct player *pl)
 }
 
 /*
- * Pi DVS: jump back to the track's own start point - the opposite of
- * player_recue() above (which redefines "here" as the new start;
- * this jumps TO the existing one). Needed specifically for relative
- * mode: absolute mode always has a real needle position to fall back
- * on, but relative mode's position free-runs with nothing to
- * physically return it to zero, so a manual cue is the only way back
- * to the beginning (owner's spec, 2026-08-01).
+ * Pi DVS: shared primitive behind player_seek_to_elapsed()/player_cue()
+ * below - jump `position` directly to `to` (position-space, offset
+ * already applied) and pause there (owner's spec, 2026-08-03).
+ * Originally player_cue_to_start() (retired - see player_seek_to_
+ * elapsed()'s own doc comment), generalized from a fixed jump-to-
+ * `offset` to an arbitrary target.
  *
- * Locked, unlike player_seek_to()/player_recue() above - those only
- * ever write `offset`, but this writes `position` directly, the same
- * field player_collect() reads to build audio.
+ * Locked, unlike player_seek_to()/player_recue() elsewhere in this
+ * file - those only ever write `offset`, but this writes `position`
+ * directly, the same field player_collect() reads to build audio.
  *
  * MUST use spin_try_lock(), not spin_lock() - confirmed as a real,
- * hardware-crashing bug (2026-08-01): unlike player_set_track() (whose
- * spin_lock() call is legitimate - it runs on the dedicated LOAD
- * worker thread, see control.c's own IMPORTANT #2), this function is
- * called from handle_cue(), directly on the realtime thread itself,
- * same as player_collect(). spin_lock()'s own precondition is
- * "current thread is not realtime" (see spin.h) - it calls
- * rt_not_allowed() unconditionally, which aborts the whole process the
- * instant a real CUE command arrived, crashing xwax and restarting it
- * with nothing loaded (read as "the track got unloaded" from the
- * app). spin_try_lock() is what player_collect() already uses for
- * this exact reason; on the rare miss (worker thread mid-swap in
- * player_set_track()) this just silently no-ops rather than blocking -
- * acceptable, the same tradeoff player_collect() already makes.
+ * hardware-crashing bug (2026-08-01, on the original player_cue_to_
+ * start()): unlike player_set_track() (whose spin_lock() call is
+ * legitimate - it runs on the dedicated LOAD worker thread, see
+ * control.c's own IMPORTANT #2), this runs directly on the realtime
+ * thread itself (called from handle_seek()/handle_goto_cue(), same as
+ * player_collect()). spin_lock()'s own precondition is "current thread
+ * is not realtime" (see spin.h) - it calls rt_not_allowed()
+ * unconditionally, which aborts the whole process the instant a real
+ * command arrived, crashing xwax and restarting it with nothing loaded
+ * (read as "the track got unloaded" from the app). spin_try_lock() is
+ * what player_collect() already uses for this exact reason; on the
+ * rare miss (worker thread mid-swap in player_set_track()) this just
+ * silently no-ops rather than blocking - acceptable, the same tradeoff
+ * player_collect() already makes.
  *
- * Pi DVS (owner's spec, 2026-08-01): if the needle is down and
- * providing a real reading right now, cueing should start the track
- * playing from its own beginning immediately, following the live
- * pitch as usual - no extra work needed here, sync_to_timecode_relative()
- * already drives pitch from the needle every buffer regardless of this
- * call. But if the needle is currently up (not providing a valid
- * reading), relative mode's normal "keep playing through a lift"
- * behaviour would otherwise carry the OLD pitch straight through this
- * jump, silently auto-playing from the new start point with nobody's
- * hand on the record - same "inheriting stale state" problem
- * player_set_track() already solves for a fresh load via
- * relative_awaiting_signal (see struct player's own doc comment), so
- * this reuses exactly that flag: pitch holds at 0 (paused, ready for
- * the needle to be dropped) until the needle actually provides its
- * next real reading. Outside the lock, same reasoning as
- * player_set_track()'s own write to this field - a plain flag, not
- * one the lock protects.
+ * Pi DVS (owner's spec, 2026-08-01, carried over from player_cue_to_
+ * start()): if the needle is down and providing a real reading right
+ * now, this jump starts the track playing from the new position
+ * immediately, following the live pitch as usual - no extra work
+ * needed here, sync_to_timecode_relative() already drives pitch from
+ * the needle every buffer regardless of this call. But if the needle
+ * is currently up (not providing a valid reading), relative mode's
+ * normal "keep playing through a lift" behaviour would otherwise carry
+ * the OLD pitch straight through this jump, silently auto-playing from
+ * the new position with nobody's hand on the record - same "inheriting
+ * stale state" problem player_set_track() already solves for a fresh
+ * load via relative_awaiting_signal (see struct player's own doc
+ * comment), so this reuses exactly that flag: pitch holds at 0
+ * (paused, ready for the needle to be dropped) until the needle
+ * actually provides its next real reading. Outside the lock, same
+ * reasoning as player_set_track()'s own write to this field - a plain
+ * flag, not one the lock protects.
  */
-void player_cue_to_start(struct player *pl)
+static void player_jump_to_position(struct player *pl, double to)
 {
     if (spin_try_lock(&pl->lock)) {
-        pl->position = pl->offset;
+        pl->position = to;
         spin_unlock(&pl->lock);
     }
     if (!pl->timecode_valid)
         pl->relative_awaiting_signal = true;
+}
+
+/*
+ * Pi DVS: jump to an arbitrary elapsed-time offset within the track
+ * and pause there (owner's spec, 2026-08-03) - the primitive behind
+ * tap-to-seek and drag-to-position (see player_jump_to_position()'s
+ * own doc comment for the pause mechanics). Elapsed-space (not
+ * position-space) since that's the convention every caller above this
+ * layer already thinks in - player_get_elapsed(), STATUS's own
+ * <remain> field, LOOP's start/end.
+ */
+void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
+{
+    player_jump_to_position(pl, pl->offset + elapsed_seconds);
+}
+
+/*
+ * Pi DVS: store the current position as the cue point (owner's spec,
+ * 2026-08-03) - SET_CUE. Position-space (offset already applied),
+ * matching player_set_loop()'s own loop_start/loop_end convention, so
+ * player_cue()/player_cue_play() below never need to repeat that
+ * arithmetic. Reads `position` unlocked - matching player_recue()'s
+ * own established pattern elsewhere in this file (only WRITES to
+ * `position` need the lock, to stay coherent with player_collect()'s
+ * own concurrent read while building audio).
+ *
+ * Plain field write, not lock-protected - called from handle_set_cue(),
+ * already on the realtime thread itself, same reasoning as
+ * player_set_loop()/player_set_relative_mode() above.
+ */
+void player_set_cue_point(struct player *pl)
+{
+    pl->cue_point = pl->position;
+}
+
+/*
+ * Pi DVS: jump to the stored cue point and pause there (owner's spec,
+ * 2026-08-03) - GOTO_CUE, replacing the old fixed player_cue_to_start()
+ * (which this now subsumes: `cue_point` defaults to the track's own
+ * start point - see struct player's own doc comment - so this does
+ * exactly what the old function did until SET_CUE is ever sent).
+ */
+void player_cue(struct player *pl)
+{
+    player_jump_to_position(pl, pl->cue_point);
+}
+
+/*
+ * Pi DVS: jump to the stored cue point and start playing FROM there,
+ * even with no real needle signal present (owner's spec, 2026-08-03) -
+ * PLAY_CUE, a genuine digital/software-driven playback, unlike every
+ * other position-setting function in this file which pauses.
+ *
+ * Deliberately does NOT use player_jump_to_position() above - that
+ * always SETS relative_awaiting_signal when the needle isn't valid
+ * (pausing); this does the opposite, CLEARING it. Relative mode's
+ * existing "lift the needle, keep playing" behaviour (see
+ * sync_to_timecode_relative()) already holds pitch at 1.0 the moment
+ * relative_awaiting_signal is false and no real needle signal is
+ * present - that's exactly the digital playback this button needs, no
+ * new pitch-source machinery required, this just reuses the mechanism
+ * that already exists for "scratch, then lift the needle and let it
+ * keep going". If the needle IS down and valid, sync_to_timecode_
+ * relative() uses the real reading regardless, same as always - this
+ * never fights a real, present signal.
+ */
+void player_cue_play(struct player *pl)
+{
+    if (spin_try_lock(&pl->lock)) {
+        pl->position = pl->cue_point;
+        spin_unlock(&pl->lock);
+    }
+    pl->relative_awaiting_signal = false;
 }
 
 /*
@@ -483,6 +557,12 @@ void player_set_track(struct player *pl, struct track *track)
      * silently inherit stale state" reasoning as relative_awaiting_
      * signal just above. Plain flag, same lock status as that field. */
     pl->loop_active = false;
+
+    /* Pi DVS: same "don't silently inherit stale state" reasoning
+     * again - a cue point bound to the previous track's own timing is
+     * meaningless here too. Defaults to `offset` (this new track's own
+     * start point), matching player_init()'s own default. */
+    pl->cue_point = pl->offset;
 
     track_release(x); /* discard the old track */
 }
