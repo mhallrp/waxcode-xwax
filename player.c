@@ -426,19 +426,15 @@ static void player_jump_to_position(struct player *pl, double to)
     if (!pl->timecode_valid)
         pl->relative_awaiting_signal = true;
 
-    /* Pi DVS (owner-reported, 2026-08-04): "if I am in a loop and
-     * press the cue button it loses its mind a bit... the loop is
-     * trying to take control of the position" - exactly right.
-     * player_collect()'s own loop wraparound runs unconditionally
-     * every buffer while loop_active, with no notion of "this
-     * position change was deliberate" - a SEEK/GOTO_CUE landing
-     * outside [loop_start, loop_end) got yanked straight back inside
-     * the loop on the very next buffer, fighting the jump. An
-     * explicit reposition ending an active loop is also just the
-     * standard DJ-hardware expectation (hitting a hot cue exits a
-     * loop on real CDJs/controllers too), not merely a bug-avoidance
-     * measure. */
-    player_clear_loop(pl);
+    /* Pi DVS: no longer clears the loop here (2026-08-04, reverted the
+     * SAME day it was added) - owner's revised call: a SEEK/GOTO_CUE
+     * landing outside the loop's own range should leave the loop armed,
+     * not cancel it outright, resuming automatically once real
+     * playback/scratching brings position back inside [loop_start,
+     * loop_end). See player_collect()'s own was_in_loop gate, which is
+     * what actually fixes the original "loop fights the jump" bug now
+     * - by no longer touching pl->position at all while it's outside
+     * the loop's range, not by clearing loop_active. */
 }
 
 /*
@@ -560,11 +556,9 @@ void player_cue_play(struct player *pl)
     }
     pl->relative_awaiting_signal = false;
 
-    /* Pi DVS (2026-08-04): same reasoning as player_jump_to_position()'s
-     * own doc comment - this is a deliberate reposition too, and
-     * doesn't route through that shared helper (see this function's
-     * own doc comment above for why), so it needs its own call. */
-    player_clear_loop(pl);
+    /* Pi DVS: no longer clears the loop here either (2026-08-04,
+     * reverted the same day it was added) - same revised reasoning as
+     * player_jump_to_position()'s own doc comment. */
 }
 
 /*
@@ -873,21 +867,45 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
         spin_unlock(&pl->lock);
     }
 
+    /* Pi DVS (2026-08-04): captured BEFORE pl->position advances below,
+     * deliberately - see the wraparound block's own doc comment for
+     * why this gates it. */
+    bool was_in_loop = pl->relative_mode && pl->loop_active
+        && pl->position >= pl->loop_start && pl->position < pl->loop_end;
+
     pl->position += r;
     pl->volume = target_volume;
 
-    /* Pi DVS: loop wraparound (owner's spec, 2026-08-02) - relative
-     * mode only, see player_set_loop()'s own doc comment for why.
-     * fmod-based rather than a flat snap to loop_start/loop_end, so a
-     * single buffer that advances (or, scratching backward, retreats)
-     * past more than the loop's own length still wraps to the correct
-     * PHASE within the loop instead of always landing exactly on its
-     * edge - matters at high scratch speeds, negligible at normal
-     * playback pitch. Symmetric: handles both a forward loop-end
-     * crossing and a backward loop-start crossing, since relative
-     * mode's pitch (and therefore this loop) can run in either
-     * direction under a real scratch. */
-    if (pl->relative_mode && pl->loop_active) {
+    /* Pi DVS: loop wraparound (owner's spec, 2026-08-02, revised
+     * 2026-08-04) - relative mode only, see player_set_loop()'s own
+     * doc comment for why. fmod-based rather than a flat snap to
+     * loop_start/loop_end, so a single buffer that advances (or,
+     * scratching backward, retreats) past more than the loop's own
+     * length still wraps to the correct PHASE within the loop instead
+     * of always landing exactly on its edge - matters at high scratch
+     * speeds, negligible at normal playback pitch. Symmetric: handles
+     * both a forward loop-end crossing and a backward loop-start
+     * crossing, since relative mode's pitch (and therefore this loop)
+     * can run in either direction under a real scratch.
+     *
+     * Gated on was_in_loop (owner's spec, 2026-08-04: "the loop stays
+     * active but is only acted upon if the position marker is within
+     * the loop area... it just activates again if the position goes
+     * inside the loop area again") - revised from an earlier version
+     * that applied this unconditionally to ANY out-of-range position,
+     * which fought a deliberate SEEK/GOTO_CUE/PLAY_CUE landing outside
+     * the loop every single buffer (confirmed as a real, disorienting
+     * bug on real hardware - see player_jump_to_position()/player_cue_
+     * play(), which used to call player_clear_loop() to work around
+     * exactly this, now reverted since the loop no longer needs
+     * clearing to escape it). Checking the PRE-advance position (not
+     * the post-advance one already written to pl->position above)
+     * means a jump that lands outside the loop just plays on normally
+     * - was_in_loop is false for every subsequent buffer until real
+     * playback/scratching brings position back inside [loop_start,
+     * loop_end), at which point it naturally starts wrapping at the
+     * edges again, same as if the loop had never been left. */
+    if (was_in_loop) {
         double loop_length = pl->loop_end - pl->loop_start;
 
         if (loop_length > 0) {

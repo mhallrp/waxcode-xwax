@@ -183,25 +183,34 @@ struct rt;
  *                    Only takes effect while relative mode is on (see
  *                    player_collect()'s own gate) - absolute mode's
  *                    position is dictated by the physical needle,
- *                    there's nothing here to loop against.
- *   LOOP OFF      - stop looping (see player_clear_loop()) - playback
- *                    continues from wherever the loop currently is,
- *                    no jump. No reply either way - same "read it back
- *                    from STATUS" idiom as RELATIVE/CUE above; STATUS's
- *                    own <loopActive>/<loopStart>/<loopEnd> fields
- *                    (added 2026-08-04, see STATUS above) are what a
- *                    client reads this back from - a client-tracked
- *                    flag with nothing to read it back from went stale
- *                    across a reconnect (a real, confirmed bug: the app
- *                    restarted mid-loop, showed no loop indication,
- *                    while xwax kept faithfully looping underneath it).
- *                    SEEK/GOTO_CUE/PLAY_CUE above all implicitly clear
- *                    an active loop too (see player_jump_to_position()/
- *                    player_cue_play()'s own doc comments) - a
- *                    deliberate reposition landing outside the loop's
- *                    own range used to fight player_collect()'s own
- *                    loop wraparound every buffer, confirmed as a real,
- *                    disorienting bug on real hardware.
+ *                    there's nothing here to loop against. An ARMED
+ *                    loop only actually wraps the position while
+ *                    that position is inside [start, end) (see
+ *                    player_collect()'s own was_in_loop gate, added
+ *                    2026-08-04, owner's spec: "the loop stays active
+ *                    but is only acted upon if the position marker is
+ *                    within the loop area... it just activates again
+ *                    if the position goes inside the loop area
+ *                    again") - a SEEK/GOTO_CUE/PLAY_CUE landing
+ *                    outside the range just plays on normally with the
+ *                    loop still armed, rather than either fighting the
+ *                    jump every buffer (the original, buggy behaviour)
+ *                    or cancelling the loop outright (an earlier,
+ *                    since-reverted fix for that same bug).
+ *   LOOP OFF      - stop looping outright (see player_clear_loop()) -
+ *                    playback continues from wherever the loop
+ *                    currently is, no jump. No reply either way - same
+ *                    "read it back from STATUS" idiom as RELATIVE/CUE
+ *                    above; STATUS's own <loopActive>/<loopStart>/
+ *                    <loopEnd> fields (added 2026-08-04, see STATUS
+ *                    above) are what a client reads this back from - a
+ *                    client-tracked flag with nothing to read it back
+ *                    from went stale across a reconnect (a real,
+ *                    confirmed bug: the app restarted mid-loop, showed
+ *                    no loop indication, while xwax kept faithfully
+ *                    looping underneath it). This is the only thing
+ *                    that actually disarms a loop now - SEEK/GOTO_CUE/
+ *                    PLAY_CUE do NOT, see LOOP above.
  */
 int control_init(struct controller *c, struct rt *rt, const char *path);
 
