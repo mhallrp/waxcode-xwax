@@ -187,10 +187,11 @@ static void commit_pcm_samples(struct track *tr, unsigned int samples)
         pcm += TRACK_CHANNELS;
     }
 
-    /* Increment the track length. A memory barrier ensures the
-     * realtime or UI thread does not access garbage audio */
+    /* __ATOMIC_RELEASE so more_space()'s block pointer write is visible to any
+     * reader that observes the new length - readers must use __ATOMIC_ACQUIRE,
+     * not a plain read (ARM64 has no implicit ordering here). See DEVLOG 2026-08-04. */
 
-    __sync_fetch_and_add(&tr->length, samples);
+    __atomic_fetch_add(&tr->length, samples, __ATOMIC_RELEASE);
 }
 
 /*

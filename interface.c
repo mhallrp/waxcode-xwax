@@ -839,6 +839,7 @@ static void draw_overview(SDL_Surface *surface, const struct rect *rect,
 {
     int x, y, w, h, r, c, sp, fade, bytes_per_pixel, pitch, height,
         current_position;
+    unsigned int length;
     Uint8 *pixels, *p;
     SDL_Color col;
 
@@ -851,8 +852,11 @@ static void draw_overview(SDL_Surface *surface, const struct rect *rect,
     bytes_per_pixel = surface->format->BytesPerPixel;
     pitch = surface->pitch;
 
-    if (tr->length)
-        current_position = (long long)position * w / tr->length;
+    /* Paired with track.c's __ATOMIC_RELEASE store - see that comment. See DEVLOG 2026-08-04. */
+    length = __atomic_load_n(&tr->length, __ATOMIC_ACQUIRE);
+
+    if (length)
+        current_position = (long long)position * w / length;
     else
         current_position = 0;
 
@@ -860,22 +864,22 @@ static void draw_overview(SDL_Surface *surface, const struct rect *rect,
 
         /* Collect the correct meter value for this column */
 
-        sp = (long long)tr->length * c / w;
+        sp = (long long)length * c / w;
 
-        if (sp < tr->length) /* account for rounding */
+        if (sp < length) /* account for rounding */
             height = track_get_overview(tr, sp) * h / 256;
         else
             height = 0;
 
         /* Choose a base colour to display in */
 
-        if (!tr->length) {
+        if (!length) {
             col = background_col;
             fade = 0;
         } else if (c == current_position) {
             col = needle_col;
             fade = 1;
-        } else if (position > tr->length - tr->rate * METER_WARNING_TIME) {
+        } else if (position > length - tr->rate * METER_WARNING_TIME) {
             col = alert_col;
             fade = 3;
         } else {
@@ -920,6 +924,7 @@ static void draw_closeup(SDL_Surface *surface, const struct rect *rect,
                          struct track *tr, int position, int scale)
 {
     int x, y, w, h, c;
+    unsigned int length;
     size_t bytes_per_pixel, pitch;
     Uint8 *pixels;
 
@@ -931,6 +936,9 @@ static void draw_closeup(SDL_Surface *surface, const struct rect *rect,
     pixels = surface->pixels;
     bytes_per_pixel = surface->format->BytesPerPixel;
     pitch = surface->pitch;
+
+    /* See draw_overview()'s matching comment - paired with track.c's release store. */
+    length = __atomic_load_n(&tr->length, __ATOMIC_ACQUIRE);
 
     /* Draw in columns. This may seem like a performance hit,
      * but oprofile shows it makes no difference */
@@ -945,7 +953,7 @@ static void draw_closeup(SDL_Surface *surface, const struct rect *rect,
         sp = position - (position % (1 << scale))
             + ((c - w / 2) << scale);
 
-        if (sp < tr->length && sp > 0)
+        if (sp < length && sp > 0)
             height = track_get_ppm(tr, sp) * h / 256;
         else
             height = 0;

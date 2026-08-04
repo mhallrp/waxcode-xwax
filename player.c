@@ -109,7 +109,11 @@ static double build_pcm(signed short *pcm, unsigned samples, double sample_dt,
                         double start_vol, double end_vol)
 {
     int s;
+    unsigned int length;
     double sample, step, vol, gradient;
+
+    /* Paired with track.c's __ATOMIC_RELEASE store on tr->length - see that comment. */
+    length = __atomic_load_n(&tr->length, __ATOMIC_ACQUIRE);
 
     sample = position * tr->rate;
     step = sample_dt * pitch * tr->rate;
@@ -131,7 +135,7 @@ static double build_pcm(signed short *pcm, unsigned samples, double sample_dt,
         sa--;
 
         for (q = 0; q < 4; q++, sa++) {
-            if (sa < 0 || sa >= tr->length) {
+            if (sa < 0 || sa >= length) {
                 for (c = 0; c < PLAYER_CHANNELS; c++)
                     i[c][q] = 0;
             } else {
