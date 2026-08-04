@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h> /* strcmp() */
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/mman.h> /* mlock() */
@@ -278,8 +279,16 @@ static struct track* track_get_again(const char *importer, const char *path)
 {
     struct track *t;
 
+    /* importer is safe to compare by pointer (deck.c sets d->importer once at deck_init() and it
+     * never changes for the process lifetime), but path is NOT - control.c's handle_load() does a
+     * fresh strdup() on every LOAD command, so two loads of the identical file get two genuinely
+     * different allocations. Comparing path by pointer here meant this function could never find a
+     * real match on identical content, AND - once a track's memory was freed and later reused by
+     * malloc() for something else - could wrongly report a match against unrelated, freed memory.
+     * Caused a real, reproducible xwax segfault reloading a track after a different one had played
+     * in between. See DEVLOG 2026-08-04. */
     list_for_each(t, &tracks, tracks) {
-        if (t->importer == importer && t->path == path) {
+        if (t->importer == importer && strcmp(t->path, path) == 0) {
             track_acquire(t);
             return t;
         }
