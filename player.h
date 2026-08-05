@@ -94,6 +94,11 @@ double player_get_cue_point_elapsed(struct player *pl);
 void player_cue(struct player *pl);
 void player_cue_play(struct player *pl);
 
+/* PLAY/PAUSE - digital transport control at whatever position `position` already holds, no jump.
+ * Contrast with player_cue()/player_cue_play(), which both jump to the cue point first. */
+void player_play(struct player *pl);
+void player_pause(struct player *pl);
+
 void player_collect(struct player *pl, signed short *pcm, unsigned samples);
 
 #endif

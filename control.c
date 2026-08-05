@@ -296,6 +296,30 @@ static void handle_play_cue(struct control *ctrl)
     player_cue_play(&ctrl->deck->player);
 }
 
+/* Realtime thread - safe directly, player_play() is a plain field write. */
+static void handle_play(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: PLAY received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: PLAY\n");
+    player_play(&ctrl->deck->player);
+}
+
+/* Realtime thread - safe directly, player_pause() is a plain field write. */
+static void handle_pause(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: PAUSE received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: PAUSE\n");
+    player_pause(&ctrl->deck->player);
+}
+
 /* Realtime thread - safe directly, player_set_loop()/player_clear_loop() are plain field writes. */
 static void handle_loop(struct control *ctrl, const char *args)
 {
@@ -337,6 +361,10 @@ static void handle_line(struct control *ctrl, char *line)
         handle_goto_cue(ctrl);
     } else if (!strcmp(line, "PLAY_CUE")) {
         handle_play_cue(ctrl);
+    } else if (!strcmp(line, "PLAY")) {
+        handle_play(ctrl);
+    } else if (!strcmp(line, "PAUSE")) {
+        handle_pause(ctrl);
     } else if (!strcmp(line, "RELATIVE ON")) {
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {

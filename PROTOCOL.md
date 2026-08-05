@@ -25,6 +25,10 @@ Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` refl
 
 **`PLAY_CUE`** — jump to the cue point and start playing immediately, even with the needle up (`player_cue_play()`) - the one genuinely digital/software-driven playback path. Reuses relative mode's "lift the needle, keep playing" mechanism; a real, present needle signal always takes over immediately if valid. No reply.
 
+**`PLAY`** — resume digital playback from wherever the deck already is, no jump (`player_play()`). Unlike `PLAY_CUE`, not tied to the cue point at all - plain transport play. Same needle-overrides-if-valid caveat as `PLAY_CUE`. No reply.
+
+**`PAUSE`** — pause at wherever the deck already is, no jump (`player_pause()`). The `PLAY`/`PAUSE` counterpart to `SEEK`/`GOTO_CUE`'s own pause semantics - only actually holds still if the needle's up. No reply.
+
 **`LOOP <start> <end>`** — loop the elapsed-time range `[start, end)` (`player_set_loop()`). Caller decides the range (e.g. one bar from the app's beat grid); only takes effect in relative mode. An armed loop only wraps the position while it's actually inside `[start, end)` - a `SEEK`/`GOTO_CUE`/`PLAY_CUE` landing outside the range plays on normally with the loop still armed, rather than fighting the jump every buffer or cancelling the loop outright.
 
 **`LOOP OFF`** — disarm the loop (`player_clear_loop()`), no jump - the only thing that actually disarms one (`SEEK`/`GOTO_CUE`/`PLAY_CUE` do not). No reply; read back via STATUS's `loopActive`/`loopStart`/`loopEnd`.

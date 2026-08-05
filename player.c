@@ -399,6 +399,24 @@ void player_cue_play(struct player *pl)
     /* Loop also not cleared here (reverted 2026-08-04) - same reasoning as player_jump_to_position(). */
 }
 
+/* Resume digital playback from wherever `position` already is - PLAY. Same
+ * relative_awaiting_signal clear as player_cue_play(), but no jump: unlike Play from Cue, this
+ * isn't tied to the cue point at all. A real, present needle signal still takes over immediately
+ * if valid, same caveat as every other relative-mode transport command (PROTOCOL.md). */
+void player_play(struct player *pl)
+{
+    pl->relative_awaiting_signal = false;
+}
+
+/* Pause at wherever `position` already is - PAUSE. Mirrors player_jump_to_position()'s
+ * awaiting-signal set without the jump - "pause" here only actually holds if the needle's up,
+ * same as SEEK/GOTO_CUE. */
+void player_pause(struct player *pl)
+{
+    if (!pl->timecode_valid)
+        pl->relative_awaiting_signal = true;
+}
+
 /*
  * Set the track used for the playback
  *
