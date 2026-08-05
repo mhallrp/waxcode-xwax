@@ -89,6 +89,7 @@ void player_recue(struct player *pl);
 
 /* Single settable cue point - see PROTOCOL.md. Writes `position` directly rather than mutating `offset` (deck.c/cues.c's upstream cue system does the latter, which conflicts with this fork's "offset never changes after init" invariant). */
 void player_seek_to_elapsed(struct player *pl, double elapsed_seconds);
+void player_relocate(struct player *pl, double elapsed_seconds);
 void player_set_cue_point(struct player *pl, double elapsed_seconds);
 double player_get_cue_point_elapsed(struct player *pl);
 void player_cue(struct player *pl);

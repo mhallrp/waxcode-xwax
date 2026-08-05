@@ -350,6 +350,19 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
     player_jump_to_position(pl, pl->offset + elapsed_seconds);
 }
 
+/* Jump to an elapsed-time offset WITHOUT touching play/pause state - unlike
+ * player_seek_to_elapsed()/player_jump_to_position(), doesn't force a pause: whatever's currently
+ * holding (playing or paused) keeps holding. RELOCATE (see PROTOCOL.md) - used to keep a shrinking
+ * loop's own position inside its new bounds without interrupting playback if it was already
+ * playing (or start it paused if it wasn't - either way, this only moves `position`). */
+void player_relocate(struct player *pl, double elapsed_seconds)
+{
+    if (spin_try_lock(&pl->lock)) {
+        pl->position = pl->offset + elapsed_seconds;
+        spin_unlock(&pl->lock);
+    }
+}
+
 /* Store an explicit elapsed-time cue point - SET_CUE (see PROTOCOL.md). Plain field write,
  * already on the realtime thread. Takes the target directly since xwax has no beat-grid of its own. */
 void player_set_cue_point(struct player *pl, double elapsed_seconds)

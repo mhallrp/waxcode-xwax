@@ -19,6 +19,8 @@ Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` refl
 
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there (same "pause" semantics as `GOTO_CUE`: only actually holds still if the needle's up). Mainly for relative-mode tap/drag-to-position. No reply.
 
+**`RELOCATE <seconds>`** — jump to an elapsed-time offset WITHOUT touching play/pause state (`player_relocate()`) - unlike `SEEK`, doesn't force a pause: whatever's currently holding (playing or paused) keeps holding. Used to keep a shrunk loop's own position inside its new bounds without interrupting playback (a `LOOP` command alone doesn't retroactively reposition - see `LOOP`'s own doc below). No reply.
+
 **`SET_CUE <seconds>`** — store an explicit cue point (`player_set_cue_point()`), replacing any previous one. Takes the target directly - the app snaps to the nearest beat-grid tick before sending, since xwax has no notion of tempo/bars. No reply; read back via STATUS's `cuePoint`.
 
 **`GOTO_CUE`** — jump to the stored cue point and pause (`player_cue()`). Subsumes the old, removed `CUE` command (jump to track start) - the cue point defaults to track start until `SET_CUE` is ever sent. No reply.

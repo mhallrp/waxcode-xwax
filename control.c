@@ -253,6 +253,25 @@ static void handle_seek(struct control *ctrl, const char *args)
     player_seek_to_elapsed(&ctrl->deck->player, seconds);
 }
 
+/* Realtime thread - safe directly, player_relocate() is a plain field write. */
+static void handle_relocate(struct control *ctrl, const char *args)
+{
+    double seconds;
+
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: RELOCATE received before a deck was assigned\n");
+        return;
+    }
+
+    if (sscanf(args, "%lf", &seconds) != 1) {
+        fprintf(stderr, "control: malformed RELOCATE command '%s'\n", args);
+        return;
+    }
+
+    fprintf(stderr, "control: RELOCATE %.3f\n", seconds);
+    player_relocate(&ctrl->deck->player, seconds);
+}
+
 /* Realtime thread, safe directly. Explicit target, not "current position" - beat-grid snapping happens app-side. */
 static void handle_set_cue(struct control *ctrl, const char *args)
 {
@@ -355,6 +374,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_status(ctrl);
     } else if (!strncmp(line, "SEEK ", 5)) {
         handle_seek(ctrl, line + 5);
+    } else if (!strncmp(line, "RELOCATE ", 9)) {
+        handle_relocate(ctrl, line + 9);
     } else if (!strncmp(line, "SET_CUE ", 8)) {
         handle_set_cue(ctrl, line + 8);
     } else if (!strcmp(line, "GOTO_CUE")) {
