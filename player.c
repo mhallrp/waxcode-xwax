@@ -400,7 +400,9 @@ void player_cue(struct player *pl)
 
 /* Jump to the cue point and start playing immediately - PLAY_CUE. Deliberately doesn't use
  * player_jump_to_position() - sets relative_playing instead of clearing it, so relative mode's
- * live-needle pitch kicks in (or holds at 1.0 with the needle up) right away. */
+ * live-needle pitch kicks in (or holds at 1.0 with the needle up) right away. Resets pitch to 1.0
+ * as this play's own starting baseline - see sync_to_timecode_relative()'s own comment for why
+ * that function no longer does this itself once already playing. */
 void player_cue_play(struct player *pl)
 {
     if (spin_try_lock(&pl->lock)) {
@@ -408,16 +410,19 @@ void player_cue_play(struct player *pl)
         spin_unlock(&pl->lock);
     }
     pl->relative_playing = true;
+    pl->pitch = 1.0;
 
     /* Loop also not cleared here (reverted 2026-08-04) - same reasoning as player_jump_to_position(). */
 }
 
 /* Resume digital playback from wherever `position` already is - PLAY. Same relative_playing set
- * as player_cue_play(), but no jump: unlike Play from Cue, this isn't tied to the cue point at
- * all. The needle only modulates pitch from here - see relative_playing's own doc comment. */
+ * and pitch reset as player_cue_play(), but no jump: unlike Play from Cue, this isn't tied to the
+ * cue point at all. The needle only modulates pitch from here - see relative_playing's own doc
+ * comment. */
 void player_play(struct player *pl)
 {
     pl->relative_playing = true;
+    pl->pitch = 1.0;
 }
 
 /* Pause at wherever `position` already is - PAUSE. Holds regardless of needle position - see
@@ -535,9 +540,13 @@ static int sync_to_timecode(struct player *pl)
  * the only thing that can hold pitch at a hard 0 - the needle never gets a vote on whether
  * playback is running, only on its speed once it already is (owner's call, 2026-08-06: the vinyl
  * is a controller for pitch/mixing, not a play/pause switch - see relative_playing's own doc
- * comment in player.h). While playing, pitch holds at 1.0 whenever the needle's lifted (not the
- * timecoder's own decaying filtered value, which would wrongly slow to a stop) and takes the
- * live needle reading whenever it's down. */
+ * comment in player.h). While playing, pitch takes the live needle reading whenever the needle's
+ * down, and simply holds at whatever it last was while the needle's lifted - not a fixed 1.0
+ * (owner's call, 2026-08-06: dropping the needle back down should resume at the pitch it was
+ * left at, not silently snap the track back to its original tempo). player_play()/
+ * player_cue_play() reset pitch to 1.0 as each play's own starting baseline, so a deck that's
+ * never had a needle reading yet still plays at normal speed rather than sitting at whatever
+ * pitch happened to be left over from before. */
 static void sync_to_timecode_relative(struct player *pl)
 {
     double when;
@@ -550,9 +559,9 @@ static void sync_to_timecode_relative(struct player *pl)
         pl->pitch = 0.0;
     } else if (pl->timecode_valid) {
         pl->pitch = timecoder_get_pitch(pl->timecoder);
-    } else {
-        pl->pitch = 1.0;
     }
+    /* else: needle's up while playing - hold the last known pitch (from a live reading, or the
+     * 1.0 baseline set by player_play()/player_cue_play()), don't reset it. */
 }
 
 /*
