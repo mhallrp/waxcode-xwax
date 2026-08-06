@@ -221,7 +221,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
 
     pl->timecode_valid = false;
     pl->relative_mode = false;
-    pl->relative_awaiting_signal = false;
+    pl->relative_playing = false;
     pl->loop_active = false;
     pl->loop_start = 0.0;
     pl->loop_end = 0.0;
@@ -328,17 +328,17 @@ void player_recue(struct player *pl)
     pl->offset = pl->position;
 }
 
-/* Shared primitive behind player_seek_to_elapsed()/player_cue() - jumps `position` and pauses.
- * Must use spin_try_lock(), not spin_lock() - this runs on the realtime thread, and spin_lock()
- * aborts the process if called there (see DEVLOG.md for the real crash this caused). */
+/* Shared primitive behind player_seek_to_elapsed()/player_cue() - jumps `position` and pauses,
+ * unconditionally in relative mode (owner's call, 2026-08-06 - see relative_playing's own doc
+ * comment). Must use spin_try_lock(), not spin_lock() - this runs on the realtime thread, and
+ * spin_lock() aborts the process if called there (see DEVLOG.md for the real crash this caused). */
 static void player_jump_to_position(struct player *pl, double to)
 {
     if (spin_try_lock(&pl->lock)) {
         pl->position = to;
         spin_unlock(&pl->lock);
     }
-    if (!pl->timecode_valid)
-        pl->relative_awaiting_signal = true;
+    pl->relative_playing = false;
 
     /* Does NOT clear the loop (reverted 2026-08-04) - a jump outside the loop's range now just
      * leaves it armed rather than cancelling it; see player_collect()'s was_in_loop gate. */
@@ -398,36 +398,34 @@ void player_cue(struct player *pl)
     player_jump_to_position(pl, pl->cue_point);
 }
 
-/* Jump to the cue point and start playing immediately, even with no needle signal - PLAY_CUE.
- * Deliberately doesn't use player_jump_to_position() - clears relative_awaiting_signal instead of
- * setting it, so relative mode's existing "lift needle, keep playing" pitch=1.0 kicks in right away. */
+/* Jump to the cue point and start playing immediately - PLAY_CUE. Deliberately doesn't use
+ * player_jump_to_position() - sets relative_playing instead of clearing it, so relative mode's
+ * live-needle pitch kicks in (or holds at 1.0 with the needle up) right away. */
 void player_cue_play(struct player *pl)
 {
     if (spin_try_lock(&pl->lock)) {
         pl->position = pl->cue_point;
         spin_unlock(&pl->lock);
     }
-    pl->relative_awaiting_signal = false;
+    pl->relative_playing = true;
 
     /* Loop also not cleared here (reverted 2026-08-04) - same reasoning as player_jump_to_position(). */
 }
 
-/* Resume digital playback from wherever `position` already is - PLAY. Same
- * relative_awaiting_signal clear as player_cue_play(), but no jump: unlike Play from Cue, this
- * isn't tied to the cue point at all. A real, present needle signal still takes over immediately
- * if valid, same caveat as every other relative-mode transport command (PROTOCOL.md). */
+/* Resume digital playback from wherever `position` already is - PLAY. Same relative_playing set
+ * as player_cue_play(), but no jump: unlike Play from Cue, this isn't tied to the cue point at
+ * all. The needle only modulates pitch from here - see relative_playing's own doc comment. */
 void player_play(struct player *pl)
 {
-    pl->relative_awaiting_signal = false;
+    pl->relative_playing = true;
 }
 
-/* Pause at wherever `position` already is - PAUSE. Mirrors player_jump_to_position()'s
- * awaiting-signal set without the jump - "pause" here only actually holds if the needle's up,
- * same as SEEK/GOTO_CUE. */
+/* Pause at wherever `position` already is - PAUSE. Holds regardless of needle position - see
+ * relative_playing's own doc comment for why this changed from the old "only holds if the
+ * needle's up" behaviour (owner's call, 2026-08-06). */
 void player_pause(struct player *pl)
 {
-    if (!pl->timecode_valid)
-        pl->relative_awaiting_signal = true;
+    pl->relative_playing = false;
 }
 
 /*
@@ -455,8 +453,9 @@ void player_set_track(struct player *pl, struct track *track)
 
     spin_unlock(&pl->lock);
 
-    /* Same "don't inherit stale state from the previous load" reasoning, for relative mode's pitch. */
-    pl->relative_awaiting_signal = true;
+    /* A fresh load starts paused - no reason a newly loaded track should play itself, and this
+     * also stops it inheriting the previous track's pitch. */
+    pl->relative_playing = false;
 
     /* A loop bound to the previous track's timing is meaningless for whatever's loading now. */
     pl->loop_active = false;
@@ -531,9 +530,14 @@ static int sync_to_timecode(struct player *pl)
 
 /* Relative-mode equivalent of sync_to_timecode() - never sets target_position, so retarget()
  * never pulls `position` back to an absolute reading (position free-runs from pitch instead).
- * Pitch holds at 1.0 while the needle's lifted (not the timecoder's own decaying filtered value,
- * which would wrongly slow to a stop) - except right after a fresh load, where it holds at 0
- * until the needle's first real reading, so a new track doesn't inherit the previous one's pitch. */
+ *
+ * relative_playing (PLAY/PLAY_CUE vs PAUSE/SEEK/GOTO_CUE/a fresh load) is checked first and is
+ * the only thing that can hold pitch at a hard 0 - the needle never gets a vote on whether
+ * playback is running, only on its speed once it already is (owner's call, 2026-08-06: the vinyl
+ * is a controller for pitch/mixing, not a play/pause switch - see relative_playing's own doc
+ * comment in player.h). While playing, pitch holds at 1.0 whenever the needle's lifted (not the
+ * timecoder's own decaying filtered value, which would wrongly slow to a stop) and takes the
+ * live needle reading whenever it's down. */
 static void sync_to_timecode_relative(struct player *pl)
 {
     double when;
@@ -542,11 +546,10 @@ static void sync_to_timecode_relative(struct player *pl)
     timecode = timecoder_get_position(pl->timecoder, &when);
     pl->timecode_valid = (timecode != -1);
 
-    if (pl->timecode_valid) {
-        pl->pitch = timecoder_get_pitch(pl->timecoder);
-        pl->relative_awaiting_signal = false;
-    } else if (pl->relative_awaiting_signal) {
+    if (!pl->relative_playing) {
         pl->pitch = 0.0;
+    } else if (pl->timecode_valid) {
+        pl->pitch = timecoder_get_pitch(pl->timecoder);
     } else {
         pl->pitch = 1.0;
     }
