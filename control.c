@@ -188,8 +188,13 @@ static void handle_status(struct control *ctrl)
     }
 
     if (ctrl->deck->record->pathname == NULL) {
-        /* Nothing loaded - pitch/relative/cue/loop fixed at zero, keeps EMPTY a simple fixed shape. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 0 0.000 0 0.000 0.000\n");
+        /* Nothing loaded - pitch/cue/loop fixed at zero, keeps EMPTY a simple fixed shape. relative
+         * stays LIVE, not fixed - relative mode can be armed before anything's loaded (a plain
+         * field write, player_set_relative_mode() never touches the track), so a client selecting
+         * it pre-load needs to be able to read that choice back. Same reasoning as IMPORTING's own
+         * live relative field below, see DEVLOG.md 2026-08-01. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000\n",
+                     ctrl->deck->player.relative_mode ? 1 : 0);
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* Import in progress - remain/pitch fixed (track->length isn't final yet). relative stays
          * LIVE, not fixed - see DEVLOG.md 2026-08-01 for the real bug that happens if it's fixed. */
