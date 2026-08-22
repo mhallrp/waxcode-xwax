@@ -310,22 +310,17 @@ double player_get_elapsed(struct player *pl)
 
 double player_get_remain(struct player *pl)
 {
-    double duration, remain;
-
-    duration = (double)pl->track->length / pl->track->rate;
-    remain = duration + pl->offset - pl->position;
-
-    /* Clamped to the track's own duration, ie. elapsed can never read as negative.
+    /* Deliberately NOT clamped to the track duration, so this reads as MORE than the duration
+     * while the needle is still in the cue offset's pre-roll (position < offset).
      *
-     * With a cue offset the needle spends its first seconds BEFORE the track starts, where
-     * position < offset and remain therefore exceeds the duration - the client derives its
-     * playhead as (duration - remain), so it got a negative position and the marker jittered
-     * with the raw timecode rather than sitting still at the start (owner-reported, 2026-08-22).
-     * Symmetric with the existing floor on the other end of the track. */
-    if (remain > duration)
-        remain = duration;
-
-    return remain;
+     * Clamping it here was tried on 2026-08-22 and made no difference, because the client already
+     * floors its own derived position at zero - so all the clamp achieved was destroying the
+     * information the client needs to tell "before the track starts" from "at the start". It needs
+     * that to know not to extrapolate the playhead forward through a stretch where the track isn't
+     * advancing; without it the estimate crept forward and got yanked back every STATUS tick,
+     * which is what the jitter actually was. See DEVLOG 2026-08-22. */
+    return (double)pl->track->length / pl->track->rate
+        + pl->offset - pl->position;
 }
 
 bool player_is_active(const struct player *pl)
