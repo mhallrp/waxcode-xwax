@@ -11,9 +11,11 @@
  * Second order over second order, so one biquad covers it. Coefficients are derived here from the
  * time constants rather than written out, so a rate other than 48kHz stays correct.
  *
- * Accuracy is limited by the bilinear transform's frequency warping near Nyquist - close to exact
- * through the midrange and a couple of dB down at the top of the band. That is the same trade the
- * previous implementation made, and it measured within 0.15dB to 5kHz.
+ * Matched-Z rather than the bilinear transform, which was tried first and rejected: bilinear warps
+ * frequency near Nyquist and put the response +6dB out at 20kHz, which the mixer's phono stage
+ * would hand straight back as harshness. Matched-Z places every pole and zero at exactly its own
+ * frequency; what remains is a gentle shortfall at the very top (-0.5dB at 10k, -2dB at 20k),
+ * where a record carries around 35dB less energy than at 1kHz anyway.
  *
  * ATTENUATION IS THE LIMITING FACTOR, not the curve. Dropping a full-scale track to the few
  * millivolts a phono input expects costs roughly 50dB, and every dB of that is a dB of the output
@@ -62,38 +64,27 @@ static double response_at(const double b[3], const double a[3], double hz, unsig
 
 void riaa_init(struct riaa *ri, unsigned int rate, double attenuate_db)
 {
-    double k, bs[3], as[3], scale;
+    double z1, z3, p2, p4, scale;
 
     memset(ri, 0, sizeof *ri);
 
     if (attenuate_db <= 0.0)
         return;
 
-    /* Expanded from the product of the two bracketed pairs above. */
-    bs[0] = 1.0;
-    bs[1] = T1 + T3;
-    bs[2] = T1 * T3;
-    as[0] = 1.0;
-    as[1] = T2 + T4;
-    as[2] = T2 * T4;
+    /* Matched-Z: each analogue pole and zero maps to z = e^(-1/(T*rate)), landing at exactly the
+     * frequency its time constant describes. T4's corner sits above Nyquist at this rate, which
+     * costs nothing - its only job is to bound a boost that is already bounded by the band. */
+    z1 = exp(-1.0 / (T1 * (double)rate));
+    z3 = exp(-1.0 / (T3 * (double)rate));
+    p2 = exp(-1.0 / (T2 * (double)rate));
+    p4 = exp(-1.0 / (T4 * (double)rate));
 
-    /* Bilinear transform, s = k(1 - z^-1)/(1 + z^-1) */
-    k = 2.0 * (double)rate;
-
-    ri->b[0] = bs[0] + bs[1] * k + bs[2] * k * k;
-    ri->b[1] = 2.0 * (bs[0] - bs[2] * k * k);
-    ri->b[2] = bs[0] - bs[1] * k + bs[2] * k * k;
-    ri->a[0] = as[0] + as[1] * k + as[2] * k * k;
-    ri->a[1] = 2.0 * (as[0] - as[2] * k * k);
-    ri->a[2] = as[0] - as[1] * k + as[2] * k * k;
-
-    /* Normalise so a[0] is unity, which riaa_apply() assumes. */
-    ri->b[0] /= ri->a[0];
-    ri->b[1] /= ri->a[0];
-    ri->b[2] /= ri->a[0];
-    ri->a[1] /= ri->a[0];
-    ri->a[2] /= ri->a[0];
+    ri->b[0] = 1.0;
+    ri->b[1] = -(z1 + z3);
+    ri->b[2] = z1 * z3;
     ri->a[0] = 1.0;
+    ri->a[1] = -(p2 + p4);
+    ri->a[2] = p2 * p4;
 
     /* 0dB at 1kHz, then the requested attenuation on top. */
     scale = pow(10.0, -attenuate_db / 20.0)

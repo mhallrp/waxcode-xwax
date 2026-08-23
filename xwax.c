@@ -68,6 +68,7 @@ static struct rt rt;
 
 static double speed;
 static bool protect, phono;
+static double phono_out_db;  /* 0 = off; otherwise dB of attenuation applied with inverse RIAA */
 static const char *importer;
 static struct timecode_def *timecode;
 static double cue_offset; /* Pi DVS: see --cue-offset and player.c's cue_offset param */
@@ -98,6 +99,7 @@ static void usage(FILE *fd)
       "  --[no-]protect      Protect against certain operations while playing\n"
       "  --line              Line level signal (default)\n"
       "  --phono             Tolerate cartridge level signal ('software pre-amp')\n"
+      "  --phono-out <dB>    Emit cartridge level, inverse RIAA, for a mixer's phono input\n"
       "  --import <program>  Track importer (default '%s')\n"
       "  --dummy             Build a dummy deck with no audio device\n\n",
       DEFAULT_IMPORTER);
@@ -252,6 +254,7 @@ int main(int argc, const char *argv[])
     speed = 1.0;
     protect = false;
     phono = false;
+    phono_out_db = 0.0;
     cue_offset = 0.0;
     use_mlock = false;
 
@@ -443,6 +446,10 @@ int main(int argc, const char *argv[])
             if (r == -1)
                 return -1;
 
+            /* After the device is up, because until then the sample rate may still be
+             * 'automatic' and the filter's coefficients depend on it. */
+            riaa_init(&device->riaa, device_sample_rate(device), phono_out_db);
+
             commit_deck();
 
             argv += 2;
@@ -542,6 +549,35 @@ int main(int argc, const char *argv[])
         } else if (!strcmp(argv[0], "--phono")) {
 
             phono = true;
+
+            argv++;
+            argc--;
+
+        } else if (!strcmp(argv[0], "--phono-out")) {
+
+            /* Pre-emphasise and attenuate the output so a mixer's phono stage undoes both,
+             * exactly as it would for a real record. The argument is how far to attenuate;
+             * roughly 50dB takes a full-scale track down to cartridge level. */
+
+            char *endptr;
+
+            if (argc < 2) {
+                fprintf(stderr, "%s requires a level in dB as an argument.\n", argv[0]);
+                return -1;
+            }
+
+            phono_out_db = strtod(argv[1], &endptr);
+            if (*endptr != '\0' || phono_out_db < 0.0) {
+                fprintf(stderr, "'%s' is not a valid attenuation in dB.\n", argv[1]);
+                return -1;
+            }
+
+            argv += 2;
+            argc -= 2;
+
+        } else if (!strcmp(argv[0], "--no-phono-out")) {
+
+            phono_out_db = 0.0;
 
             argv++;
             argc--;

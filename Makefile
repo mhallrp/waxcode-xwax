@@ -56,6 +56,7 @@ OBJS = control.o \
 	excrate.o \
 	external.o \
 	index.o \
+	riaa.o \
 	interface.o \
 	library.o \
 	listbox.o \
@@ -76,6 +77,7 @@ TESTS = tests/cues \
 	tests/external \
 	tests/library \
 	tests/observer \
+	tests/riaa \
 	tests/status \
 	tests/timecoder \
 	tests/track \
@@ -172,6 +174,9 @@ tests/library:	LDFLAGS += -pthread
 
 tests/midi:	tests/midi.o midi.o
 tests/midi:	LDLIBS += $(ALSA_LIBS)
+
+tests/riaa:	tests/riaa.o riaa.o
+tests/riaa:	LDLIBS += -lm
 
 tests/observer:	tests/observer.o
 

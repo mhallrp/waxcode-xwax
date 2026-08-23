@@ -23,11 +23,13 @@
 #include <poll.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include "riaa.h"
 
 #define DEVICE_CHANNELS 2
 
 struct device {
     bool fault;
+    struct riaa riaa;  /* inverse RIAA on the output; inactive unless --phono-out */
     void *local;
     struct device_ops *ops;
 

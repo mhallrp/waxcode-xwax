@@ -143,4 +143,8 @@ void device_collect(struct device *dv, signed short *pcm, size_t n)
 {
     assert(dv->player != NULL);
     player_collect(dv->player, pcm, n);
+
+    /* The only point playback audio passes through, so the only place this needs to be. Does
+     * nothing unless --phono-out asked for it. */
+    riaa_apply(&dv->riaa, pcm, n);
 }
