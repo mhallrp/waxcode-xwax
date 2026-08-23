@@ -22,9 +22,16 @@
  * word thrown away before the mixer amplifies it back. On a 16-bit path that leaves around 50dB of
  * signal-to-noise where a line output has 96dB. The arithmetic below is kept in double precision
  * so that raising the output path's bit depth later improves this without touching this file.
+ *
+ * Because so few bits survive, how the result is quantised matters more here than it would at full
+ * level, and the first version got it wrong in a way that was audible as crackle on quiet passages:
+ * a bare cast truncates toward zero, which puts a deadband around silence. Rounded and dithered
+ * now. Dither trades a little noise for the removal of quantisation DISTORTION, which is the right
+ * trade at 7-odd effective bits - distortion tracks the signal and is heard, where noise does not.
  */
 
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "riaa.h"
@@ -94,7 +101,37 @@ void riaa_init(struct riaa *ri, unsigned int rate, double attenuate_db)
     ri->b[1] *= scale;
     ri->b[2] *= scale;
 
+    /* Distinct seeds: identical dither on both channels would correlate into the centre of the
+     * image rather than spreading, which is audible as a change in width on quiet passages. */
+    ri->dither[0] = 0x9e3779b9u;
+    ri->dither[1] = 0x85ebca6bu;
+
     ri->active = true;
+}
+
+/*
+ * Apply in place to interleaved stereo
+ *
+ * Pre: pcm holds frames stereo samples
+ * Post: pcm is pre-emphasised and attenuated, if this filter is active
+ */
+
+/*
+ * Uniform random in [0,1), from a cheap xorshift.
+ *
+ * In the audio thread, so it must not allocate, lock, or call into libc's rand(), which is neither
+ * fast nor reentrant. Quality beyond "no audible pattern" is not required of dither.
+ */
+static double dither_uniform(uint32_t *state)
+{
+    uint32_t x = *state;
+
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+
+    return (double)x / 4294967296.0;
 }
 
 /*
@@ -114,7 +151,7 @@ void riaa_apply(struct riaa *ri, signed short *pcm, size_t frames)
 
     for (n = 0; n < frames; n++) {
         for (c = 0; c < RIAA_CHANNELS; c++) {
-            double in, out;
+            double in, out, dithered;
 
             in = (double)pcm[n * RIAA_CHANNELS + c];
             out = ri->b[0] * in
@@ -126,16 +163,28 @@ void riaa_apply(struct riaa *ri, signed short *pcm, size_t frames)
             ri->x[c][1] = ri->x[c][0];
             ri->x[c][0] = in;
             ri->y[c][1] = ri->y[c][0];
-            ri->y[c][0] = out;
+
+            /* Feedback keeps the unclamped, undithered value: clamping into the state would
+             * distort the filter itself rather than just its output, and dither fed back would
+             * accumulate. Flushed to zero when it decays below audibility, because a denormal in
+             * this loop costs far more than the sample is worth. */
+            ri->y[c][0] = (out > -1e-20 && out < 1e-20) ? 0.0 : out;
+
+            /* TPDF: two uniforms summed, spanning one LSB either side. Triangular rather than
+             * rectangular so the noise floor stops depending on the signal. */
+            dithered = out + (dither_uniform(&ri->dither[c]) + dither_uniform(&ri->dither[c]) - 1.0);
 
             /* The boost is large at the top of the band, so a bright transient can exceed full
              * scale even after attenuation. Clamp rather than let it wrap. */
-            if (out > 32767.0)
-                out = 32767.0;
-            else if (out < -32768.0)
-                out = -32768.0;
+            if (dithered > 32767.0)
+                dithered = 32767.0;
+            else if (dithered < -32768.0)
+                dithered = -32768.0;
 
-            pcm[n * RIAA_CHANNELS + c] = (signed short)out;
+            /* Round, do NOT truncate. A cast rounds toward zero, which leaves a deadband around
+             * silence - heard as crackle on quiet passages, and much worse here than usual because
+             * attenuation leaves so few bits in play. */
+            pcm[n * RIAA_CHANNELS + c] = (signed short)floor(dithered + 0.5);
         }
     }
 }

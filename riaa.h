@@ -12,6 +12,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define RIAA_CHANNELS 2
 
@@ -20,6 +21,7 @@ struct riaa {
     double b[3], a[3];              /* biquad, a[0] normalised to 1 */
     double x[RIAA_CHANNELS][2];     /* per-channel input history */
     double y[RIAA_CHANNELS][2];     /* per-channel output history */
+    uint32_t dither[RIAA_CHANNELS]; /* xorshift state, one per channel */
 };
 
 void riaa_init(struct riaa *ri, unsigned int rate, double attenuate_db);

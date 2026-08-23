@@ -120,6 +120,42 @@ int main(int argc, char *argv[])
     for (n = 0; n < 8; n++)
         assert(pcm[n] >= -32768 && pcm[n] <= 32767);
 
+    /*
+     * Quantisation must be unbiased.
+     *
+     * This is the bug that shipped: a bare cast truncates toward zero, so a level below one LSB
+     * came out as pure silence and everything quiet came out biased - heard as crackle. With
+     * rounding and dither the long-run average tracks the true value even when that value is a
+     * fraction of one LSB, which is the whole point of dithering a heavily attenuated signal.
+     */
+    {
+        static const double attenuation = 60.0;   /* deep enough that DC lands well under 1 LSB */
+        double dc_gain, expected, total = 0.0;
+        signed short block[2];
+        int i;
+
+        riaa_init(&ri, RATE, attenuation);
+        dc_gain = (ri.b[0] + ri.b[1] + ri.b[2]) / (ri.a[0] + ri.a[1] + ri.a[2]);
+        expected = 20000.0 * dc_gain;
+
+        /* Settle the filter before measuring. */
+        for (i = 0; i < 4000; i++) {
+            block[0] = 20000;
+            block[1] = 20000;
+            riaa_apply(&ri, block, 1);
+        }
+
+        for (i = 0; i < 200000; i++) {
+            block[0] = 20000;
+            block[1] = 20000;
+            riaa_apply(&ri, block, 1);
+            total += block[0];
+        }
+
+        /* Truncation would pull this toward zero - to exactly zero when |expected| < 1. */
+        assert(fabs(total / 200000.0 - expected) < 0.05);
+    }
+
     printf("riaa: ok\n");
     return 0;
 }
