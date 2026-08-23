@@ -51,6 +51,11 @@
 #define SQ(x) ((x)*(x))
 #define TARGET_UNKNOWN INFINITY
 
+/* Below this pitch the deck is inaudible anyway (volume scales with |pitch|), so treating the
+ * needle as stopped here costs nothing - including at a scratch's direction changes, which pass
+ * through zero constantly. */
+#define NEEDLE_STOPPED_PITCH 0.01
+
 /*
  * Return: the cubic interpolation of the sample at position 2 + mu
  */
@@ -220,6 +225,8 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->last_difference = 0.0;
 
     pl->timecode_valid = false;
+    /* Nothing plays until the needle has told us where it is, not merely how fast it is going. */
+    pl->position_known = false;
     pl->relative_mode = false;
     pl->relative_playing = false;
     pl->loop_active = false;
@@ -534,9 +541,16 @@ static int sync_to_timecode(struct player *pl)
 
     if (timecode == -1) {
         pl->target_position = TARGET_UNKNOWN;
+
+        /* Only once the needle has actually stopped do we give up on knowing where it is. An
+         * undecodable patch mid-play is normal and playback coasts through it on pitch, which is
+         * what the sync_pitch decay below exists for. */
+        if (fabs(pl->pitch) < NEEDLE_STOPPED_PITCH)
+            pl->position_known = false;
     } else {
         tcpos = (double)timecode / timecoder_get_resolution(pl->timecoder);
         pl->target_position = tcpos + pl->pitch * when;
+        pl->position_known = true;
     }
 
     return 0;
@@ -680,7 +694,25 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
     /* We must return audio immediately to stay realtime. A spin
      * lock protects us from changes to the audio source */
 
-    if (!spin_try_lock(&pl->lock)) {
+    /*
+     * Stay silent until the timecoder has decoded an absolute position.
+     *
+     * Pitch is recovered from the sine wave well before the position encoded on the record can be
+     * decoded, so there is a window where we know how fast the needle is moving but not where it
+     * is. Playing during it means playing from whatever `position` was left at - and with a cue
+     * offset that is the track's very first sample, so dropping the needle at the start of the
+     * record produced an audible blip of the track head before the absolute reading arrived and
+     * moved playback into the pre-roll where it belonged (reported 2026-08-23).
+     *
+     * Upstream xwax never sees this because it recalibrates `offset` to wherever the needle first
+     * locks; this fork deliberately does not (see DEVLOG), so it has to wait instead.
+     *
+     * Position still advances underneath - build_silence returns the same distance - so the snap
+     * when the reading finally arrives is no larger than it was before.
+     */
+    bool position_unknown = pl->timecode_control && !pl->relative_mode && !pl->position_known;
+
+    if (position_unknown || !spin_try_lock(&pl->lock)) {
         r = build_silence(pcm, samples, pl->sample_dt, pitch);
     } else {
         r = build_pcm(pcm, samples, pl->sample_dt, pl->track,

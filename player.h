@@ -49,6 +49,7 @@ struct player {
     bool timecode_control,
         recalibrate, /* re-sync offset at next opportunity */
         timecode_valid, /* needle down and reading a valid locked position - not the same as pitch~=0, which is also true when paused */
+        position_known, /* the timecoder has decoded an ABSOLUTE position since the needle last stopped. False means we know how fast the needle is moving but not where it is, and must not play - see player_collect() */
         relative_mode, /* needle drives live pitch/scratch but its absolute position is never consulted - see PROTOCOL.md's RELATIVE */
         relative_playing, /* relative mode's own play/pause state - true only from PLAY/PLAY_CUE, false from PAUSE/SEEK/GOTO_CUE/a fresh load. The needle modulates pitch while this is true (live scratch) but never starts or stops playback itself - lifting it doesn't pause, and dropping it back down doesn't resume. Owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch. */
         loop_active; /* [loop_start, loop_end) below - only consulted while relative_mode is also on */
