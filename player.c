@@ -219,7 +219,10 @@ void player_init(struct player *pl, unsigned int sample_rate,
     player_set_timecoder(pl, tc);
 
     pl->position = 0.0;
-    /* cue_offset is a fixed calibration constant (--cue-offset), not a dynamic recue - see DEVLOG.md. */
+    /* cue_offset is a fixed calibration constant (--cue-offset), not a dynamic recue - see DEVLOG.md.
+     * Kept as well as applied: `offset` is mutable working state that relative mode rewrites, and
+     * without the constant surviving somewhere the calibration is gone the first time it does. */
+    pl->cue_offset = cue_offset;
     pl->offset = cue_offset;
     pl->target_position = TARGET_UNKNOWN;
     pl->last_difference = 0.0;
@@ -286,6 +289,10 @@ void player_set_relative_mode(struct player *pl, bool on)
 {
     pl->relative_mode = on;
     if (!on) {
+        /* Relative mode leaves `offset` wherever its last seek put it. Absolute mode's offset
+         * describes the timecode record, so it has to come back the moment relative mode ends -
+         * not merely at the next load, or the deck reads wrong until one happens. */
+        pl->offset = pl->cue_offset;
         pl->recalibrate = true;
         pl->loop_active = false; /* a loop only ever applies in relative mode */
     }
@@ -467,8 +474,24 @@ void player_set_track(struct player *pl, struct track *track)
     x = pl->track;
     pl->track = track;
 
+    /*
+     * Restore the calibration before anything else reads it.
+     *
+     * Relative mode rewrites `offset` as its whole mechanism - player_seek_to and player_clone
+     * both set it from the current position - so a deck used in relative mode and switched back to
+     * absolute carried a meaningless offset into the next load. `elapsed` is position - offset, so
+     * a track loaded afterwards appeared wherever that arithmetic happened to land: the owner
+     * found every track opening at its end after leaving a relative-mode track stopped there
+     * (2026-08-28).
+     *
+     * Absolute mode's offset is a property of the TIMECODE RECORD, not of whatever was played
+     * last, so a load is exactly the point to put it back.
+     */
+    if (!pl->relative_mode)
+        pl->offset = pl->cue_offset;
+
     /* If the needle isn't currently valid, `position` is stale from a previous load - reset to
-     * `offset` (track start) rather than silently starting mid-track. Not touching `offset` itself. */
+     * `offset` (track start) rather than silently starting mid-track. */
     if (!pl->timecode_valid)
         pl->position = pl->offset;
 

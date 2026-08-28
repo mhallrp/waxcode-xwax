@@ -45,6 +45,11 @@ struct player {
 
     /* Timecode control */
 
+    /* The --cue-offset calibration: where the track's start sits on the timecode record. Set once
+     * and never written again - `offset` below is the working value, which relative mode moves
+     * about, and this is what absolute mode restores it from. */
+    double cue_offset;
+
     struct timecoder *timecoder;
     bool timecode_control,
         recalibrate, /* re-sync offset at next opportunity */
