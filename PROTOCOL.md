@@ -9,9 +9,24 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 **`UNLOAD`** — clear the deck back to empty, so a passthrough loop (`alsaloop`, managed by Node) can take over the DAC output. No reply; STATUS shows `EMPTY` once it takes effect. No `PASSTHRU` command exists here - passthrough lives entirely outside xwax.
 
 **`STATUS`** — replies with one of:
-- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000\n`
-- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <path>\n`
-- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <path>\n`
+- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000 0.000\n`
+- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> <path>\n`
+- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <path>\n`
+
+`elapsed` (added 2026-08-28) is `player_get_elapsed()` - position minus the cue offset, straight off
+the timecode. It owes nothing to the loaded track, so unlike `remain` it is **live during
+IMPORTING**: `remain` is the one field that needs `track->length`, which is still growing while the
+import runs, which is why it alone stays fixed at 0.0 there.
+
+A client that knows the track's duration (the app reads it from the file's tags) derives remaining
+from `elapsed` itself, so its readout is live from the moment the needle drops rather than blank for
+the seconds a decode takes. Audio is already playing by then regardless - `build_pcm()` reads
+`track->length` atomically each buffer and plays whatever has decoded so far, filling silence beyond
+it.
+
+Note for parsers: `elapsed` sits BEFORE `<path>`, because a path may contain spaces and so must stay
+last. Node's own parser treats it as optional and requires the path to be absolute, so it reads both
+this format and an older xwax that omits the field - the two deploy separately.
 
 Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` reflects whether the platter's spinning fast enough to be "on" (real needle or an active `PLAY_CUE`), not just whether a track is loaded. `pitch` = signed speed relative to normal (1.0 = real time, negative = reverse), read lock-free from `struct player`. `relative`/`cuePoint`/`loopActive`/`loopStart`/`loopEnd` are all "read it back" fields - the box is the source of truth, not the client, so state survives an app/Node reconnect. `relative` is live even in `EMPTY` (2026-08-19) - relative mode can be armed with nothing loaded (`player_set_relative_mode()` is a plain field write, no track needed), so a client selecting it pre-load needs to read that choice back before anything's loaded. `path` is always last, unquoted (may contain spaces, never a newline).
 

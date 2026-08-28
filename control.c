@@ -193,13 +193,22 @@ static void handle_status(struct control *ctrl)
          * field write, player_set_relative_mode() never touches the track), so a client selecting
          * it pre-load needs to be able to read that choice back. Same reasoning as IMPORTING's own
          * live relative field below, see DEVLOG.md 2026-08-01. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000\n",
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000 0.000\n",
                      ctrl->deck->player.relative_mode ? 1 : 0);
     } else if (track_is_importing(ctrl->deck->player.track)) {
-        /* Import in progress - remain/pitch fixed (track->length isn't final yet). relative stays
-         * LIVE, not fixed - see DEVLOG.md 2026-08-01 for the real bug that happens if it's fixed. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %s\n",
-                     ctrl->deck->player.relative_mode ? 1 : 0, ctrl->deck->record->pathname);
+        /* Import in progress - remain stays fixed because it is the one field that needs
+         * track->length, which isn't final yet. `elapsed` is NOT fixed: it is position minus offset,
+         * both straight off the timecode, so it is valid from the first revolution and has nothing
+         * to do with how much of the track has decoded. A client that knows the duration (the app
+         * reads it from the file's tags) can derive remaining from it itself, which is what stops
+         * the readout sitting blank for the seconds an import takes. Audio is already playing by
+         * then - build_pcm() reads track->length live and just plays whatever has decoded so far.
+         *
+         * relative stays LIVE too, not fixed - see DEVLOG.md 2026-08-01 for the real bug otherwise. */
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %.4f %s\n",
+                     ctrl->deck->player.relative_mode ? 1 : 0,
+                     player_get_elapsed(&ctrl->deck->player),
+                     ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
         if (remain < 0.0)
@@ -207,13 +216,14 @@ static void handle_status(struct control *ctrl)
         state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
         /* Precision fields (pitch/relative/cuePoint/loop) are read back live, not client-tracked,
          * so scrub/loop/cue stay in sync across a reconnect - see DEVLOG.md for the full history. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_cue_point_elapsed(&ctrl->deck->player),
                      player_get_loop_active(&ctrl->deck->player) ? 1 : 0,
                      player_get_loop_start_elapsed(&ctrl->deck->player),
                      player_get_loop_end_elapsed(&ctrl->deck->player),
+                     player_get_elapsed(&ctrl->deck->player),
                      ctrl->deck->record->pathname);
     }
 
