@@ -9,9 +9,20 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 **`UNLOAD`** — clear the deck back to empty, so a passthrough loop (`alsaloop`, managed by Node) can take over the DAC output. No reply; STATUS shows `EMPTY` once it takes effect. No `PASSTHRU` command exists here - passthrough lives entirely outside xwax.
 
 **`STATUS`** — replies with one of:
-- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000 0.000\n`
-- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> <path>\n`
-- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <path>\n`
+- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000 0.000 0\n`
+- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> 0 <path>\n`
+- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <timecodeValid> <path>\n`
+
+`timecodeValid` (added 2026-08-29) is `player.timecode_valid`: the needle is down and reading a
+locked position. Deliberately not the same as `pitch != 0`, which is also false when merely paused.
+
+It tells a client whether anything OUTSIDE the app can move this deck. With the needle up in
+relative mode nothing can - the deck runs at a fixed rate under the app's own commands - so the app
+can extrapolate the playhead from its own clock and ignore position corrections entirely, which is
+the only way to guarantee the playhead never twitches. Once the needle is down the deck's position
+and pitch are driven by the record and the app must follow what is reported.
+
+Always 0 for EMPTY and IMPORTING: nothing is locked to a needle in either state.
 
 `elapsed` (added 2026-08-28) is `player_get_elapsed()` - position minus the cue offset, straight off
 the timecode. It owes nothing to the loaded track, so unlike `remain` it is **live during
