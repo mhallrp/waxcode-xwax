@@ -99,7 +99,7 @@ static void usage(FILE *fd)
       "  --[no-]protect      Protect against certain operations while playing\n"
       "  --line              Line level signal (default)\n"
       "  --phono             Tolerate cartridge level signal ('software pre-amp')\n"
-      "  --phono-out <dB>    Emit cartridge level, inverse RIAA, for a mixer's phono input\n"
+      "  --phono-out <dB>    Attenuation of the phono output pair (default 46)\n"
       "  --import <program>  Track importer (default '%s')\n"
       "  --dummy             Build a dummy deck with no audio device\n\n",
       DEFAULT_IMPORTER);
@@ -254,7 +254,10 @@ int main(int argc, const char *argv[])
     speed = 1.0;
     protect = false;
     phono = false;
-    phono_out_db = 0.0;
+    /* The phono output pair always carries a cartridge-level signal, so this is a real default
+     * rather than "off" - at 0 the pair would emit full-scale line level into a mixer's phono
+     * input, which is both wrong and loud. --phono-out only trims the amount. */
+    phono_out_db = 46.0;
     cue_offset = 0.0;
     use_mlock = false;
 
@@ -577,6 +580,8 @@ int main(int argc, const char *argv[])
 
         } else if (!strcmp(argv[0], "--no-phono-out")) {
 
+            /* Leaves the phono pair flat and unattenuated, ie. a second line output. Only useful
+             * for measuring the two pairs against each other - see the crosstalk check. */
             phono_out_db = 0.0;
 
             argv++;

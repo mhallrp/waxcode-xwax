@@ -19,6 +19,7 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "debug.h"
 #include "device.h"
@@ -133,18 +134,52 @@ void device_submit(struct device *dv, signed short *pcm, size_t n)
     timecoder_submit(dv->timecoder, pcm, n);
 }
 
+/* Frames per pass through the interleave below. Fixed and small so the two scratch buffers sit on
+ * the stack - the realtime thread must not allocate - while staying large enough that the loop
+ * overhead is nothing beside the filtering. */
+#define COLLECT_CHUNK 256
+
 /*
  * Collect audio from the processing to send to a device
  *
- * Post: buffer pcm is filled with n stereo samples
+ * Post: buffer pcm is filled with n frames of DEVICE_PLAYBACK_CHANNELS samples - the track flat on
+ * channels 0-1, and inverse-RIAA'd and attenuated on 2-3.
+ *
+ * Both are produced every time rather than one being selected, so a deck's line and phono outputs
+ * are both always live and it is the cable that decides which is used, not a setting.
  */
 
 void device_collect(struct device *dv, signed short *pcm, size_t n)
 {
-    assert(dv->player != NULL);
-    player_collect(dv->player, pcm, n);
+    signed short line[COLLECT_CHUNK * DEVICE_CHANNELS];
+    signed short phono[COLLECT_CHUNK * DEVICE_CHANNELS];
+    size_t done = 0;
 
-    /* The only point playback audio passes through, so the only place this needs to be. Does
-     * nothing unless --phono-out asked for it. */
-    riaa_apply(&dv->riaa, pcm, n);
+    assert(dv->player != NULL);
+
+    while (done < n) {
+        size_t chunk, i;
+
+        chunk = n - done;
+        if (chunk > COLLECT_CHUNK)
+            chunk = COLLECT_CHUNK;
+
+        player_collect(dv->player, line, chunk);
+
+        /* Filtered from a copy so the line half stays flat. riaa_apply is a stateful IIR, and
+         * chunking preserves sample order, so its history stays continuous across passes. */
+        memcpy(phono, line, chunk * DEVICE_CHANNELS * sizeof *phono);
+        riaa_apply(&dv->riaa, phono, chunk);
+
+        for (i = 0; i < chunk; i++) {
+            signed short *frame = pcm + (done + i) * DEVICE_PLAYBACK_CHANNELS;
+
+            frame[0] = line[i * DEVICE_CHANNELS];
+            frame[1] = line[i * DEVICE_CHANNELS + 1];
+            frame[2] = phono[i * DEVICE_CHANNELS];
+            frame[3] = phono[i * DEVICE_CHANNELS + 1];
+        }
+
+        done += chunk;
+    }
 }

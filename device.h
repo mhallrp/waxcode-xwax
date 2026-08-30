@@ -25,11 +25,19 @@
 #include <sys/types.h>
 #include "riaa.h"
 
+/* Capture, and everything the player works in, is stereo. */
 #define DEVICE_CHANNELS 2
+
+/* Playback carries BOTH levels at once: the track flat on channels 0-1 for a mixer's line input,
+ * and the same track inverse-RIAA'd and attenuated on 2-3 for its phono input. Emitting both
+ * removes the setting that used to decide which one the single pair carried - a setting that could
+ * silently disagree with how the box was actually cabled. asound.conf routes each pair to its own
+ * physical jack, so a deck has a dedicated line output and a dedicated phono output. */
+#define DEVICE_PLAYBACK_CHANNELS 4
 
 struct device {
     bool fault;
-    struct riaa riaa;  /* inverse RIAA on the output; inactive unless --phono-out */
+    struct riaa riaa;  /* inverse RIAA, applied only to the phono half of the output */
     void *local;
     struct device_ops *ops;
 

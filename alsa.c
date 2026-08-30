@@ -73,7 +73,7 @@ static bool _check(const char *s, int r)
  * A "buffer" of 0 uses the device's maximum.
  */
 
-static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
+static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream, unsigned int channels,
                    unsigned int *rate,
                    snd_pcm_uframes_t buffer)
 {
@@ -125,10 +125,10 @@ static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
         /* "rate" is set on return */
     }
 
-    r = snd_pcm_hw_params_set_channels(pcm, hw, DEVICE_CHANNELS);
+    r = snd_pcm_hw_params_set_channels(pcm, hw, channels);
     CHECK("hw_params_set_channels", r) {
-        fprintf(stderr, "%d channel audio not available on this device.\n",
-                DEVICE_CHANNELS);
+        fprintf(stderr, "%u channel audio not available on this device.\n",
+                channels);
     }
 
     /* Declare buffer size first, attempting to ensure it is not
@@ -235,6 +235,7 @@ static bool set_sw(snd_pcm_t *pcm)
 
 static int flow_open(struct flow *flow, const char *name,
                      snd_pcm_stream_t stream,
+                     unsigned int channels,
                      unsigned int rate,
                      int buffer)
 {
@@ -248,7 +249,7 @@ static int flow_open(struct flow *flow, const char *name,
 
     flow->rate = rate;
 
-    if (!set_hw(flow->pcm, stream, &flow->rate, buffer))
+    if (!set_hw(flow->pcm, stream, channels, &flow->rate, buffer))
         return -1;
 
     if (!set_sw(flow->pcm))
@@ -342,10 +343,14 @@ static ssize_t pollfds(struct device *dv, struct pollfd *pe, size_t z)
  */
 
 static signed short *buffer(const snd_pcm_channel_area_t *area,
-                            snd_pcm_uframes_t offset)
+                            snd_pcm_uframes_t offset,
+                            unsigned int channels)
 {
     assert(area->first % 8 == 0);
-    assert(area->step == 32);  /* 2 channel 16-bit interleaved */
+    /* 16-bit interleaved, and the caller's idea of the frame size must match the hardware's - a
+     * mismatch here writes every frame at the wrong stride, which is silence and noise rather
+     * than an error, so it is worth asserting rather than trusting. */
+    assert(area->step == channels * 16);
 
     return area->addr + area->first / 8 + offset * area->step / 8;
 }
@@ -386,7 +391,7 @@ static int playback(struct device *dv)
         return r;
 
     if (frames > 0)
-        device_collect(dv, buffer(&area[0], offset), frames);
+        device_collect(dv, buffer(&area[0], offset, DEVICE_PLAYBACK_CHANNELS), frames);
 
     r = snd_pcm_mmap_commit(alsa->playback.pcm, offset, frames);
     if (r < 0)
@@ -434,7 +439,7 @@ static int capture(struct device *dv)
         return r;
 
     if (frames > 0)
-        device_submit(dv, buffer(&area[0], offset), frames);
+        device_submit(dv, buffer(&area[0], offset, DEVICE_CHANNELS), frames);
 
     r = snd_pcm_mmap_commit(alsa->capture.pcm, offset, frames);
     if (r < 0)
@@ -582,14 +587,14 @@ int alsa_init(struct device *dv, const char *name,
      * by testing this in isolation on real hardware, confirmed
      * clean by ear at buffer=256. */
     if (flow_open(&alsa->capture, name, SND_PCM_STREAM_CAPTURE,
-                 rate, buffer) < 0)
+                 DEVICE_CHANNELS, rate, buffer) < 0)
     {
         fputs("Failed to open device for capture.\n", stderr);
         goto fail;
     }
 
     if (flow_open(&alsa->playback, name, SND_PCM_STREAM_PLAYBACK,
-                rate, buffer) < 0)
+                DEVICE_PLAYBACK_CHANNELS, rate, buffer) < 0)
     {
         fputs("Failed to open device for playback.\n", stderr);
         goto fail_capture;
