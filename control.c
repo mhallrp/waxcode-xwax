@@ -412,11 +412,15 @@ static void handle_signal(struct control *ctrl)
      * many consecutive error checks have passed: the honest measure of lock quality. ticker is
      * samples since a valid timecode was read - it climbs the moment the needle leaves the record. */
 
-    n = snprintf(reply, sizeof reply, "SIGNAL %d %d %d %u %u %d %d\n",
+    /* threshold travels with the reading rather than being reproduced by the client: it is
+     * ZERO_THRESHOLD shifted down in phono mode, so a client deriving it would have to duplicate
+     * that and stay in step with it. Sent last so an older client's parser is unaffected. */
+    n = snprintf(reply, sizeof reply, "SIGNAL %d %d %d %u %u %d %d %d\n",
                  tc->peak_left, tc->peak_right, tc->ref_level,
                  tc->valid_counter, tc->timecode_ticker,
                  tc->forwards ? 1 : 0,
-                 timecoder_get_safe(tc) ? 1 : 0);
+                 timecoder_get_safe(tc) ? 1 : 0,
+                 tc->threshold);
 
     if (n < 0 || (size_t)n >= sizeof reply) {
         fprintf(stderr, "control: SIGNAL reply truncated\n");

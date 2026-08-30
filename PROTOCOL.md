@@ -41,7 +41,7 @@ this format and an older xwax that omits the field - the two deploy separately.
 
 Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` reflects whether the platter's spinning fast enough to be "on" (real needle or an active `PLAY_CUE`), not just whether a track is loaded. `pitch` = signed speed relative to normal (1.0 = real time, negative = reverse), read lock-free from `struct player`. `relative`/`cuePoint`/`loopActive`/`loopStart`/`loopEnd` are all "read it back" fields - the box is the source of truth, not the client, so state survives an app/Node reconnect. `relative` is live even in `EMPTY` (2026-08-19) - relative mode can be armed with nothing loaded (`player_set_relative_mode()` is a plain field write, no track needed), so a client selecting it pre-load needs to read that choice back before anything's loaded. `path` is always last, unquoted (may contain spaces, never a newline).
 
-**`SIGNAL`** — replies with `SIGNAL <peakLeft> <peakRight> <refLevel> <validCounter> <ticker> <forwards> <safe>\n`.
+**`SIGNAL`** — replies with `SIGNAL <peakLeft> <peakRight> <refLevel> <validCounter> <ticker> <forwards> <safe> <threshold>\n`.
 
 Diagnostics for a calibration screen. Deliberately NOT part of STATUS: that is polled ~20 times a
 second for every deck, and this is only wanted while someone is looking at a calibration display.
@@ -60,6 +60,9 @@ None of it is used for decoding.
   here means the channels are swapped, which otherwise reads as perfectly clean timecode at a steady
   negative pitch.
 - `safe` — whether the decoded position is currently trustworthy.
+- `threshold` — the amplitude below which a signal cannot be decoded at all (`ZERO_THRESHOLD`,
+  shifted down ~36dB in phono mode). Sent rather than left for the client to derive, so a level
+  meter can mark the real floor without duplicating the phono shift and drifting out of step.
 
 **`RELATIVE ON|OFF`** — toggle relative mode (see `player_set_relative_mode()`). While ON, the needle drives live pitch/scratch whenever the deck is playing, but never starts or stops playback itself and its absolute position is never consulted - lifting it leaves the track playing instead of stopping it, at whatever pitch was last read rather than snapping back to 1.0, and dropping the needle back down doesn't resume a paused deck (owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch - see `player.h`'s `relative_playing` field). No reply; read back via STATUS's `relative` field. Switching OFF snaps to wherever the needle currently reads, not an offset-preserving continuation.
 
