@@ -326,9 +326,11 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
 
     tc->dt = 1.0 / sample_rate;
     tc->zero_alpha = tc->dt / (ZERO_RC + tc->dt);
-    tc->threshold = ZERO_THRESHOLD;
+    tc->base_threshold = ZERO_THRESHOLD;
     if (phono)
-        tc->threshold >>= 5; /* approx -36dB */
+        tc->base_threshold >>= 5; /* approx -36dB */
+    tc->sensitivity = 0;
+    tc->threshold = tc->base_threshold;
 
     tc->forwards = 1;
     init_channel(&tc->primary);
@@ -344,6 +346,28 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
     tc->timecode_ticker = 0;
 
     tc->scope = NULL;
+}
+
+/*
+ * Set how much noise the decoder tolerates before it will read a wave at all
+ *
+ * Level 0 is the calibrated default. Each step doubles the threshold, so a booth with heavy
+ * low-end can be made to stop triggering on rumble at the cost of no longer reading the quietest
+ * part of the signal. Capped rather than open-ended: past this the threshold starts rejecting
+ * genuine timecode from a healthy cartridge.
+ *
+ * Written from the control thread while the audio thread reads it. A single aligned int on this
+ * platform, and a torn read is not possible - the worst case is one sample decided against the
+ * old value, which is indistinguishable from the change arriving a sample later.
+ */
+
+void timecoder_set_sensitivity(struct timecoder *tc, unsigned int level)
+{
+    if (level > TIMECODER_MAX_SENSITIVITY)
+        level = TIMECODER_MAX_SENSITIVITY;
+
+    tc->sensitivity = level;
+    tc->threshold = tc->base_threshold << level;
 }
 
 /*

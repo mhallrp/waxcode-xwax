@@ -42,6 +42,11 @@ struct timecode_def {
     struct lut lut;
 };
 
+/* Highest sensitivity step. Each step doubles the zero-crossing threshold, so this is the
+ * calibrated default shifted up three times - past that a healthy cartridge's own signal starts
+ * being rejected along with the rumble. */
+#define TIMECODER_MAX_SENSITIVITY 3
+
 struct timecoder_channel {
     bool positive, /* wave is in positive part of cycle */
         swapped; /* wave recently swapped polarity */
@@ -57,6 +62,11 @@ struct timecoder {
 
     double dt, zero_alpha;
     signed int threshold;
+    /* threshold at sensitivity 0, ie. after the phono shift but before any user adjustment -
+     * kept so raising and lowering sensitivity is always relative to the same starting point
+     * rather than compounding off the last value. */
+    signed int base_threshold;
+    unsigned int sensitivity;
 
     /* Pitch information */
 
@@ -87,6 +97,12 @@ struct timecoder {
 };
 
 struct timecode_def* timecoder_find_definition(const char *name);
+/* Raise the amplitude a wave must reach before it counts as a zero crossing at all. Trades
+ * responsiveness to a weak or quiet signal for immunity to rumble and vibration - the compromise
+ * a DJ makes knowingly in a demanding booth, which is why it is exposed rather than fixed. */
+
+void timecoder_set_sensitivity(struct timecoder *tc, unsigned int level);
+
 void timecoder_free_lookup(void);
 
 void timecoder_init(struct timecoder *tc, struct timecode_def *def,

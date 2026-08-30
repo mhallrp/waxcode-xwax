@@ -393,6 +393,23 @@ static void handle_loop(struct control *ctrl, const char *args)
  * Levels are raw, in the same scale as the samples themselves (a 16-bit sample shifted left 16), so
  * a client divides by INT_MAX to get 0..1 rather than this having to pick a unit.
  */
+static void handle_sensitivity(struct control *ctrl, const char *arg)
+{
+    unsigned int level;
+
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: SENSITIVITY received before a deck was assigned\n");
+        return;
+    }
+
+    if (sscanf(arg, "%u", &level) != 1) {
+        fprintf(stderr, "control: SENSITIVITY expects a level\n");
+        return;
+    }
+
+    timecoder_set_sensitivity(&ctrl->deck->timecoder, level);
+}
+
 static void handle_signal(struct control *ctrl)
 {
     char reply[256];
@@ -415,12 +432,13 @@ static void handle_signal(struct control *ctrl)
     /* threshold travels with the reading rather than being reproduced by the client: it is
      * ZERO_THRESHOLD shifted down in phono mode, so a client deriving it would have to duplicate
      * that and stay in step with it. Sent last so an older client's parser is unaffected. */
-    n = snprintf(reply, sizeof reply, "SIGNAL %d %d %d %u %u %d %d %d\n",
+    n = snprintf(reply, sizeof reply, "SIGNAL %d %d %d %u %u %d %d %d %u\n",
                  tc->peak_left, tc->peak_right, tc->ref_level,
                  tc->valid_counter, tc->timecode_ticker,
                  tc->forwards ? 1 : 0,
                  timecoder_get_safe(tc) ? 1 : 0,
-                 tc->threshold);
+                 tc->threshold,
+                 tc->sensitivity);
 
     if (n < 0 || (size_t)n >= sizeof reply) {
         fprintf(stderr, "control: SIGNAL reply truncated\n");
@@ -442,6 +460,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_status(ctrl);
     } else if (!strcmp(line, "SIGNAL")) {
         handle_signal(ctrl);
+    } else if (!strncmp(line, "SENSITIVITY ", 12)) {
+        handle_sensitivity(ctrl, line + 12);
     } else if (!strncmp(line, "SEEK ", 5)) {
         handle_seek(ctrl, line + 5);
     } else if (!strncmp(line, "RELOCATE ", 9)) {
