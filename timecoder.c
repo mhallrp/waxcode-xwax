@@ -42,6 +42,10 @@
 
 #define ZERO_THRESHOLD (128 << 16)
 
+/* Decay rate for the per-channel peak meters: halves roughly every 4096 samples (~85ms at 48kHz),
+ * so a meter reads like a meter rather than latching on one transient. */
+#define PEAK_DECAY_SHIFT 12
+
 #define ZERO_RC 0.001 /* time constant for zero/rumble filter */
 
 #define REF_PEAKS_AVG 48 /* in wave cycles */
@@ -332,6 +336,8 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
     pitch_init(&tc->pitch, tc->dt);
 
     tc->ref_level = INT_MAX;
+    tc->peak_left = 0;
+    tc->peak_right = 0;
     tc->bitstream = 0;
     tc->timecode = 0;
     tc->valid_counter = 0;
@@ -613,6 +619,21 @@ void timecoder_submit(struct timecoder *tc, signed short *pcm, size_t npcm)
             primary = right;
             secondary = left;
         }
+
+        /* Two compares and two shifts per sample, on the realtime path - negligible beside the
+         * filtering process_sample already does, and it is the only way to tell a user their left
+         * channel is dead rather than just "no signal". Decays over about 4000 samples so a meter
+         * built from it falls at a readable rate rather than latching. */
+
+        if (abs(left) > tc->peak_left)
+            tc->peak_left = abs(left);
+        else
+            tc->peak_left -= tc->peak_left >> PEAK_DECAY_SHIFT;
+
+        if (abs(right) > tc->peak_right)
+            tc->peak_right = abs(right);
+        else
+            tc->peak_right -= tc->peak_right >> PEAK_DECAY_SHIFT;
 
         process_sample(tc, primary, secondary);
         update_scope(tc, left, right);

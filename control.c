@@ -383,6 +383,51 @@ static void handle_loop(struct control *ctrl, const char *args)
     player_set_loop(&ctrl->deck->player, start, end);
 }
 
+/*
+ * Signal diagnostics, for the app's calibration screen.
+ *
+ * Separate from STATUS deliberately: STATUS is polled ~20 times a second for every deck and this is
+ * only wanted while someone is actually looking at a calibration screen. None of it is used for
+ * decoding.
+ *
+ * Levels are raw, in the same scale as the samples themselves (a 16-bit sample shifted left 16), so
+ * a client divides by INT_MAX to get 0..1 rather than this having to pick a unit.
+ */
+static void handle_signal(struct control *ctrl)
+{
+    char reply[256];
+    struct timecoder *tc;
+    int n;
+
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: SIGNAL received before a deck was assigned\n");
+        return;
+    }
+
+    tc = &ctrl->deck->timecoder;
+
+    /* peakLeft/peakRight diagnose the input itself - both low is a weak cartridge, one near zero is
+     * a dead channel or an unplugged lead. refLevel is what bit decisions actually compare against
+     * and self-calibrates, so it says how strong the timecode is once decoding. validCounter is how
+     * many consecutive error checks have passed: the honest measure of lock quality. ticker is
+     * samples since a valid timecode was read - it climbs the moment the needle leaves the record. */
+
+    n = snprintf(reply, sizeof reply, "SIGNAL %d %d %d %u %u %d %d\n",
+                 tc->peak_left, tc->peak_right, tc->ref_level,
+                 tc->valid_counter, tc->timecode_ticker,
+                 tc->forwards ? 1 : 0,
+                 timecoder_get_safe(tc) ? 1 : 0);
+
+    if (n < 0 || (size_t)n >= sizeof reply) {
+        fprintf(stderr, "control: SIGNAL reply truncated\n");
+        return;
+    }
+
+    /* Same short, non-blocking write as STATUS - a dropped reply costs one poll tick. */
+    if (write(ctrl->client_fd, reply, (size_t)n) == -1)
+        perror("control: write SIGNAL reply");
+}
+
 static void handle_line(struct control *ctrl, char *line)
 {
     if (!strncmp(line, "LOAD ", 5)) {
@@ -391,6 +436,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_unload(ctrl);
     } else if (!strcmp(line, "STATUS")) {
         handle_status(ctrl);
+    } else if (!strcmp(line, "SIGNAL")) {
+        handle_signal(ctrl);
     } else if (!strncmp(line, "SEEK ", 5)) {
         handle_seek(ctrl, line + 5);
     } else if (!strncmp(line, "RELOCATE ", 9)) {

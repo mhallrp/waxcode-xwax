@@ -72,6 +72,13 @@ struct timecoder {
     unsigned int valid_counter, /* number of successful error checks */
         timecode_ticker; /* samples since valid timecode was read */
 
+    /* Decaying peak per input channel, for the app's calibration display. Not used for decoding -
+     * ref_level below is what bit decisions compare against, and it self-calibrates. These exist so
+     * a user can be shown WHY a bad setup is failing: both low means a weak cartridge, one near
+     * zero means a dead channel or an unplugged lead. */
+
+    signed int peak_left, peak_right;
+
     /* Scope display */
 
     unsigned char *scope; /* x-y array */

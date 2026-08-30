@@ -41,6 +41,26 @@ this format and an older xwax that omits the field - the two deploy separately.
 
 Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` reflects whether the platter's spinning fast enough to be "on" (real needle or an active `PLAY_CUE`), not just whether a track is loaded. `pitch` = signed speed relative to normal (1.0 = real time, negative = reverse), read lock-free from `struct player`. `relative`/`cuePoint`/`loopActive`/`loopStart`/`loopEnd` are all "read it back" fields - the box is the source of truth, not the client, so state survives an app/Node reconnect. `relative` is live even in `EMPTY` (2026-08-19) - relative mode can be armed with nothing loaded (`player_set_relative_mode()` is a plain field write, no track needed), so a client selecting it pre-load needs to read that choice back before anything's loaded. `path` is always last, unquoted (may contain spaces, never a newline).
 
+**`SIGNAL`** — replies with `SIGNAL <peakLeft> <peakRight> <refLevel> <validCounter> <ticker> <forwards> <safe>\n`.
+
+Diagnostics for a calibration screen. Deliberately NOT part of STATUS: that is polled ~20 times a
+second for every deck, and this is only wanted while someone is looking at a calibration display.
+None of it is used for decoding.
+
+- `peakLeft` / `peakRight` — decaying peak per INPUT channel, same scale as the samples (a 16-bit
+  sample shifted left 16), so divide by INT_MAX for 0..1. Both low is a weak cartridge; one near
+  zero is a dead channel or an unplugged lead. This is the pair that tells a user *why* a setup is
+  failing rather than just that it is.
+- `refLevel` — what bit decisions actually compare against. It self-calibrates to whatever amplitude
+  arrives (a running average of observed peaks), which is why a software gain control would not help
+  decoding: scaling the input scales this identically.
+- `validCounter` — consecutive successful error checks. The honest measure of lock quality.
+- `ticker` — samples since a valid timecode was read; climbs the moment the needle leaves the record.
+- `forwards` — the direction the timecode is being read in. With the platter running forwards, a 0
+  here means the channels are swapped, which otherwise reads as perfectly clean timecode at a steady
+  negative pitch.
+- `safe` — whether the decoded position is currently trustworthy.
+
 **`RELATIVE ON|OFF`** — toggle relative mode (see `player_set_relative_mode()`). While ON, the needle drives live pitch/scratch whenever the deck is playing, but never starts or stops playback itself and its absolute position is never consulted - lifting it leaves the track playing instead of stopping it, at whatever pitch was last read rather than snapping back to 1.0, and dropping the needle back down doesn't resume a paused deck (owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch - see `player.h`'s `relative_playing` field). No reply; read back via STATUS's `relative` field. Switching OFF snaps to wherever the needle currently reads, not an offset-preserving continuation.
 
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there, unconditionally in relative mode (same pause semantics as `GOTO_CUE`). Mainly for relative-mode tap/drag-to-position. No reply.
