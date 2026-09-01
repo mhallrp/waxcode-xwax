@@ -457,9 +457,11 @@ static void player_jump_to_position(struct player *pl, double to)
      *
      * Two wrong versions were tried first. Rebasing `offset` here made the seek STICK, leaving the
      * deck drifted from a gesture nobody thinks of as re-labelling the record. Turning tracking off
-     * here was worse: it made that same tap silently relocate the track, so dropping the needle at
-     * the start then played from halfway - breaking the very behaviour the plain write gives for
-     * free (owner's call, 2026-09-01).
+     * here was worse still: it dropped the deck into relative mode, where `relative_playing` is
+     * false after a seek and the needle CANNOT start playback at all (see its doc in player.h) - so
+     * dropping the needle did nothing whatsoever and the deck read as dead, then started at halfway
+     * on the next PLAY. The plain write gives the right behaviour for free (owner's call,
+     * 2026-09-01).
      *
      * PLAY/PAUSE/PLAY_CUE do flip the mode, because those start or stop playback and so genuinely
      * declare who is driving. Positioning a paused deck declares nothing. */

@@ -157,7 +157,7 @@ Not merely tidier. With tracking on, `PLAY` and `PAUSE` did nothing whatsoever: 
 
 **Positioning a paused deck declares nothing, so it does not flip.** `SEEK`, `GOTO_CUE` and `SET_CUE` all leave the mode alone. With tracking on a seek is a *preview*: it writes `position`, and `retarget()` reclaims it the moment the needle is readable. Tap to halfway, drop the needle at the start, and the track plays from the start - no harm done, because the needle is the authority and it wins.
 
-Making these flip was tried and was worse: that same tap silently relocated the track, so dropping the needle at the start then played from halfway. Rebasing `offset` here was also tried, and made the seek stick as permanent drift from a gesture nobody thinks of as re-labelling the record. The plain write is correct in both modes.
+Making these flip was tried and was worse: it dropped the deck into relative mode, where `relative_playing` is false after a seek and **the needle cannot start playback at all** - so dropping the needle did nothing whatsoever and the deck read as dead, then started at halfway on the next `PLAY`. Rebasing `offset` here was also tried, and made the seek stick as permanent drift from a gesture nobody thinks of as re-labelling the record. The plain write is correct in both modes.
 
 **Looping is the one thing that drifts while tracking, and deliberately so.** It is the only action you take *while* the record plays normally, so it stays in tracking and slides `offset` instead (see `LOOP`).
 
