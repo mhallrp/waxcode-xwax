@@ -571,6 +571,17 @@ void player_play(struct player *pl)
  * needle's up" behaviour (owner's call, 2026-08-06). */
 void player_pause(struct player *pl)
 {
+    /* Same rule as player_play(), and for the same reason: pausing is a digital transport gesture,
+     * so it declares that the app is driving this deck. With tracking on it was not merely a no-op
+     * but an impossible request - `relative_playing` is read only by sync_to_timecode_relative(),
+     * and playback is the needle's to start and stop. Stopping the audio while the record keeps
+     * turning is exactly what relative mode is, so pause has to move the deck there to mean
+     * anything. See PROTOCOL.md's "The mode picks itself".
+     *
+     * Note the play/pause button needs no help from this: STATUS's PLAYING/STOPPED comes from
+     * player_is_active(), which is |pitch| > 0.01, and with tracking on pitch is the needle's. It
+     * already reads "pause" while the record turns and "play" once the needle lifts. */
+    player_set_relative_mode(pl, true);
     pl->relative_playing = false;
 }
 
