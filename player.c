@@ -231,6 +231,8 @@ void player_init(struct player *pl, unsigned int sample_rate,
     /* Nothing plays until the needle has told us where it is, not merely how fast it is going. */
     pl->position_known = false;
     pl->relative_mode = false;
+    pl->relative_needle_position = 0.0;
+    pl->relative_needle_known = false;
     pl->relative_playing = false;
     pl->loop_active = false;
     pl->loop_start = 0.0;
@@ -288,17 +290,52 @@ void player_set_internal_playback(struct player *pl)
 void player_set_relative_mode(struct player *pl, bool on)
 {
     pl->relative_mode = on;
-    if (!on) {
-        /* Relative mode leaves `offset` wherever its last seek put it. Absolute mode's offset
-         * describes the timecode record, so it has to come back the moment relative mode ends -
-         * not merely at the next load, or the deck reads wrong until one happens. */
-        pl->offset = pl->cue_offset;
-        pl->recalibrate = true;
+
+    if (on) {
+        /* Nothing known yet about where the needle is under this stretch of relative mode. */
+        pl->relative_needle_known = false;
+    } else {
+        /* Turning tracking ON: adopt the needle where it currently is and LEAVE THE TRACK WHERE IT
+         * IS PLAYING. This used to reset offset to cue_offset and snap the track to whatever the
+         * needle read, which meant the toggle could throw the track anywhere mid-set - hostile for
+         * a control the DJ is meant to reach for. Owner's call, 2026-09-01.
+         *
+         * elapsed is position - offset, so preserving it across the switch means choosing an offset
+         * relative to where position is about to land, which is the needle:
+         *
+         *     offset = needle - elapsed
+         *
+         * `position` is moved to the needle in the same breath, because in relative mode it is the
+         * free-running software position and has nothing to do with the needle's own. Setting one
+         * without the other would change elapsed, which is the exact thing being preserved.
+         *
+         * Needle up (or never down since relative mode began) leaves the mapping untouched: there
+         * is no reading to adopt, and inventing one would be worse than waiting for a needle drop
+         * to settle it authoritatively.
+         *
+         * NOTE: this deliberately no longer resets drift. See PROTOCOL.md's RELATIVE - the toggle
+         * cannot both preserve the track's position and restore the record's own labelling, and
+         * preserving position is the one that has to be safe to press mid-set. */
+        if (pl->relative_needle_known) {
+            double elapsed = pl->position - pl->offset;
+            double new_offset = pl->relative_needle_position - elapsed;
+            double delta = new_offset - pl->offset;
+
+            pl->offset = new_offset;
+            pl->position = pl->relative_needle_position;
+
+            /* Everything else held in position-space moves with the mapping, exactly as
+             * player_rebase_offset() does it, so the cue point and any armed loop keep the ELAPSED
+             * meaning they had instead of sliding through the track. */
+            pl->cue_point += delta;
+            pl->loop_start += delta;
+            pl->loop_end += delta;
+        }
+        pl->recalibrate = false;
+
         /* The loop deliberately SURVIVES this now. It used to be destroyed here because the wrap
          * rewrote `position`, which retarget() then undid - so a loop could not work in tracking
-         * mode at all. player_collect() slides `offset` instead, so it can. Resetting offset above
-         * is what makes toggling tracking off and back on the DJ's way to discard accumulated
-         * drift and get the record's own labelling back. See PROTOCOL.md's RELATIVE. */
+         * mode at all. player_collect() slides `offset` instead, so it can. */
     }
 }
 
@@ -653,6 +690,16 @@ static void sync_to_timecode_relative(struct player *pl)
         pl->pitch = 0.0;
     } else if (pl->timecode_valid) {
         pl->pitch = timecoder_get_pitch(pl->timecoder);
+    }
+
+    /* Relative mode never consults the needle's absolute position - but remember it anyway, so
+     * switching tracking back on can adopt the needle where it is instead of snapping the track to
+     * it. Updated whenever the needle is readable, needle-down or not, since a deck paused with the
+     * needle resting still has a perfectly good position to adopt. */
+    if (pl->timecode_valid) {
+        pl->relative_needle_position = (double)timecode / timecoder_get_resolution(pl->timecoder)
+            + timecoder_get_pitch(pl->timecoder) * when;
+        pl->relative_needle_known = true;
     }
     /* else: needle's up while playing - hold the last known pitch (from a live reading, or the
      * 1.0 baseline set by player_play()/player_cue_play()), don't reset it. */

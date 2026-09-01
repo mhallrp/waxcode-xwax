@@ -61,6 +61,15 @@ struct player {
 
     double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
+    /* The needle's last VALID absolute reading while in relative mode, where nothing else consults
+     * it. Kept so that turning tracking back on can adopt the needle where it currently is and
+     * leave the track where it is playing, rather than snapping. Tracked continuously rather than
+     * read at the moment of the switch, so a momentary undecodable patch right as the DJ taps the
+     * toggle doesn't read as "needle up". `relative_needle_known` is false until the needle has
+     * been down at least once since relative mode began. */
+    double relative_needle_position;
+    bool relative_needle_known;
+
     double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
 };
 

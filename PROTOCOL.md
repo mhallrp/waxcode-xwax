@@ -94,7 +94,13 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 
 **The app presents this inverted, as a "position tracking" toggle: tracking ON is `RELATIVE OFF`.** The two are one control with one question behind it - *is the needle the authority on this deck?* Only four behaviours actually differ: a needle drop (snaps the track, vs does nothing), a small skip (pitch-corrected, vs ignored), a large skip past `SKIP_THRESHOLD` (jumps, vs ignored), and losing the signal - needle lifted, record run out, past the safe zone - which stops a tracking deck and lets a non-tracking one play on at its held pitch. Everything else, loops and cues included, is identical.
 
-Switching OFF resets `offset` to `cue_offset`, which since 2026-09-01 is also the DJ's way to **discard accumulated drift** (see STATUS's `drift`) and get the record's own labelling back. It no longer clears an active loop: the loop survives the switch in both directions.
+Switching OFF (ie. turning tracking ON) **adopts the needle where it currently is and leaves the track playing where it is.** It used to reset `offset` to `cue_offset` and snap the track to whatever the needle read, which meant the toggle could throw the track anywhere mid-set. Since `elapsed` is `position - offset`, preserving it means `offset = needle - elapsed`, with `position` moved to the needle in the same breath; the cue point and any armed loop shift with the mapping so they keep their elapsed meaning. The needle's position is tracked continuously while relative mode is on (`relative_needle_position`) rather than sampled at the switch, so a momentary undecodable patch right as the DJ taps the toggle does not read as "needle up".
+
+With the needle up - or never down since relative mode began - the mapping is left untouched: there is no reading to adopt, and a needle drop will settle it authoritatively soon enough.
+
+**This means the toggle no longer resets drift.** It cannot do both: preserving the track's position and restoring the record's own labelling are different offsets, and preserving position is the one that has to be safe to press mid-set. A separate deliberate gesture is needed to discard drift and recover a track whose tail has been looped past the end of the usable timecode - see DEVLOG 2026-09-01, currently an open item.
+
+It no longer clears an active loop either: the loop survives the switch in both directions.
 
 ### How a jump lands, in each mode
 
