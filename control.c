@@ -193,7 +193,7 @@ static void handle_status(struct control *ctrl)
          * field write, player_set_relative_mode() never touches the track), so a client selecting
          * it pre-load needs to be able to read that choice back. Same reasoning as IMPORTING's own
          * live relative field below, see DEVLOG.md 2026-08-01. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000 0.000 0\n",
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000 0.000 0 0.000\n",
                      ctrl->deck->player.relative_mode ? 1 : 0);
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* timecodeValid is 0 here, and in EMPTY: nothing is locked to a needle in either state. A
@@ -208,9 +208,10 @@ static void handle_status(struct control *ctrl)
          * then - build_pcm() reads track->length live and just plays whatever has decoded so far.
          *
          * relative stays LIVE too, not fixed - see DEVLOG.md 2026-08-01 for the real bug otherwise. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %.4f 0 %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %.4f 0 %.3f %s\n",
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_elapsed(&ctrl->deck->player),
+                     player_get_offset_drift(&ctrl->deck->player),
                      ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
@@ -219,7 +220,7 @@ static void handle_status(struct control *ctrl)
         state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
         /* Precision fields (pitch/relative/cuePoint/loop) are read back live, not client-tracked,
          * so scrub/loop/cue stay in sync across a reconnect - see DEVLOG.md for the full history. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %.3f %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_cue_point_elapsed(&ctrl->deck->player),
@@ -228,6 +229,7 @@ static void handle_status(struct control *ctrl)
                      player_get_loop_end_elapsed(&ctrl->deck->player),
                      player_get_elapsed(&ctrl->deck->player),
                      ctrl->deck->player.timecode_valid ? 1 : 0,
+                     player_get_offset_drift(&ctrl->deck->player),
                      ctrl->deck->record->pathname);
     }
 

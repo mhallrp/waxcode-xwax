@@ -57,7 +57,7 @@ struct player {
         position_known, /* the timecoder has decoded an ABSOLUTE position since the needle last stopped. False means we know how fast the needle is moving but not where it is, and must not play - see player_collect() */
         relative_mode, /* needle drives live pitch/scratch but its absolute position is never consulted - see PROTOCOL.md's RELATIVE */
         relative_playing, /* relative mode's own play/pause state - true only from PLAY/PLAY_CUE, false from PAUSE/SEEK/GOTO_CUE/a fresh load. The needle modulates pitch while this is true (live scratch) but never starts or stops playback itself - lifting it doesn't pause, and dropping it back down doesn't resume. Owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch. */
-        loop_active; /* [loop_start, loop_end) below - only consulted while relative_mode is also on */
+        loop_active; /* [loop_start, loop_end) below - applies in BOTH modes; how it wraps differs, see player_collect() */
 
     double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
@@ -76,6 +76,13 @@ void player_set_internal_playback(struct player *pl);
 void player_set_relative_mode(struct player *pl, bool on);
 void player_set_loop(struct player *pl, double start_seconds, double end_seconds);
 void player_clear_loop(struct player *pl);
+
+/* How far `offset` has been slid away from the --cue-offset calibration, in seconds. Zero means
+ * the needle's position and the track's agree; non-zero means looping (or a seek, in non-tracking
+ * mode) has moved the track along the record by this much. Reported via STATUS so the app can show
+ * it - the DJ cannot otherwise tell, and it is the number that warns them before the track's tail
+ * runs past the end of the timecode. See PROTOCOL.md. */
+double player_get_offset_drift(struct player *pl);
 
 /* Reported back via STATUS (see PROTOCOL.md) - 0/0.000/0.000 whenever loop_active is false. */
 bool player_get_loop_active(struct player *pl);

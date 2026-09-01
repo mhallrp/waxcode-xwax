@@ -9,9 +9,9 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 **`UNLOAD`** — clear the deck back to empty, so a passthrough loop (`alsaloop`, managed by Node) can take over the DAC output. No reply; STATUS shows `EMPTY` once it takes effect. No `PASSTHRU` command exists here - passthrough lives entirely outside xwax.
 
 **`STATUS`** — replies with one of:
-- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000 0.000 0\n`
-- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> 0 <path>\n`
-- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <timecodeValid> <path>\n`
+- `STATUS EMPTY 0.0 0.000 <relative> 0.000 0 0.000 0.000 0.000 0 0.000\n`
+- `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> 0 <drift> <path>\n`
+- `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <timecodeValid> <drift> <path>\n`
 
 `timecodeValid` (added 2026-08-29) is `player.timecode_valid`: the needle is down and reading a
 locked position. Deliberately not the same as `pitch != 0`, which is also false when merely paused.
@@ -35,9 +35,22 @@ the seconds a decode takes. Audio is already playing by then regardless - `build
 `track->length` atomically each buffer and plays whatever has decoded so far, filling silence beyond
 it.
 
-Note for parsers: `elapsed` sits BEFORE `<path>`, because a path may contain spaces and so must stay
-last. Node's own parser treats it as optional and requires the path to be absolute, so it reads both
-this format and an older xwax that omits the field - the two deploy separately.
+`drift` (added 2026-09-01) is `player_get_offset_drift()` - how far `offset` has been slid from the
+`--cue-offset` calibration, in seconds, signed. Zero means the needle's position and the track's
+agree. Positive means the track has slid FORWARD along the timecode record, so track 0:00 now sits
+that far into the vinyl.
+
+It becomes non-zero when a loop wraps in tracking mode (each wrap adds one loop length - see
+`LOOP`), and from any seek in non-tracking mode, where moving `offset` is the whole mechanism. It
+returns to zero on a load, and on `RELATIVE OFF`.
+
+Clients should surface it: the DJ has no other way to know the record has been re-labelled under
+them, and it is the number that warns them before the track's tail runs past the end of the usable
+timecode. Fixed at 0.000 for `EMPTY` - a load resets it, so it has no meaning with nothing loaded.
+
+Note for parsers: `elapsed` and `drift` sit BEFORE `<path>`, because a path may contain spaces and
+so must stay last. Node's own parser treats both as optional and requires the path to be absolute, so it reads this
+format and an older xwax that omits either field - the two deploy separately.
 
 Field meanings: `remain` = seconds left, clamped ≥ 0. `PLAYING`/`STOPPED` reflects whether the platter's spinning fast enough to be "on" (real needle or an active `PLAY_CUE`), not just whether a track is loaded. `pitch` = signed speed relative to normal (1.0 = real time, negative = reverse), read lock-free from `struct player`. `relative`/`cuePoint`/`loopActive`/`loopStart`/`loopEnd` are all "read it back" fields - the box is the source of truth, not the client, so state survives an app/Node reconnect. `relative` is live even in `EMPTY` (2026-08-19) - relative mode can be armed with nothing loaded (`player_set_relative_mode()` is a plain field write, no track needed), so a client selecting it pre-load needs to read that choice back before anything's loaded. `path` is always last, unquoted (may contain spaces, never a newline).
 
@@ -79,6 +92,10 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 
 **`RELATIVE ON|OFF`** — toggle relative mode (see `player_set_relative_mode()`). While ON, the needle drives live pitch/scratch whenever the deck is playing, but never starts or stops playback itself and its absolute position is never consulted - lifting it leaves the track playing instead of stopping it, at whatever pitch was last read rather than snapping back to 1.0, and dropping the needle back down doesn't resume a paused deck (owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch - see `player.h`'s `relative_playing` field). No reply; read back via STATUS's `relative` field. Switching OFF snaps to wherever the needle currently reads, not an offset-preserving continuation.
 
+**The app presents this inverted, as a "position tracking" toggle: tracking ON is `RELATIVE OFF`.** The two are one control with one question behind it - *is the needle the authority on this deck?* Only four behaviours actually differ: a needle drop (snaps the track, vs does nothing), a small skip (pitch-corrected, vs ignored), a large skip past `SKIP_THRESHOLD` (jumps, vs ignored), and losing the signal - needle lifted, record run out, past the safe zone - which stops a tracking deck and lets a non-tracking one play on at its held pitch. Everything else, loops and cues included, is identical.
+
+Switching OFF resets `offset` to `cue_offset`, which since 2026-09-01 is also the DJ's way to **discard accumulated drift** (see STATUS's `drift`) and get the record's own labelling back. It no longer clears an active loop: the loop survives the switch in both directions.
+
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there, unconditionally in relative mode (same pause semantics as `GOTO_CUE`). Mainly for relative-mode tap/drag-to-position. No reply.
 
 **`RELOCATE <seconds>`** — jump to an elapsed-time offset WITHOUT touching play/pause state (`player_relocate()`) - unlike `SEEK`, doesn't force a pause: whatever's currently holding (playing or paused) keeps holding. Used to keep a shrunk loop's own position inside its new bounds without interrupting playback (a `LOOP` command alone doesn't retroactively reposition - see `LOOP`'s own doc below). No reply.
@@ -93,6 +110,11 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 
 **`PAUSE`** — pause at wherever the deck already is, no jump, needle up or down (`player_pause()`). The `PLAY`/`PAUSE` counterpart to `SEEK`/`GOTO_CUE`'s own pause semantics. No reply.
 
-**`LOOP <start> <end>`** — loop the elapsed-time range `[start, end)` (`player_set_loop()`). Caller decides the range (e.g. one bar from the app's beat grid); only takes effect in relative mode. An armed loop only wraps the position while it's actually inside `[start, end)` - a `SEEK`/`GOTO_CUE`/`PLAY_CUE` landing outside the range plays on normally with the loop still armed, rather than fighting the jump every buffer or cancelling the loop outright.
+**`LOOP <start> <end>`** — loop the elapsed-time range `[start, end)` (`player_set_loop()`). Caller decides the range (e.g. one bar from the app's beat grid). **Works in both modes since 2026-09-01** (it was relative-only before), but wraps differently in each, because the two disagree about who owns `position`:
+
+- **Non-tracking (`RELATIVE ON`)** - `position` free-runs from pitch and nothing else writes it, so the wrap rewrites it directly. Unchanged.
+- **Tracking (`RELATIVE OFF`)** - `retarget()` drags `position` toward the needle every cycle, so rewriting it would just be undone; that is why a loop was impossible here before. Instead `offset` and the loop bounds slide forward by one loop length per wrap and `position` is never touched. Since `elapsed` is `position - offset`, elapsed drops back by exactly the loop length while the needle keeps driving position. The loop window travels through timecode space at the needle's own rate and stands still in track time.
+
+The consequence, which a client must surface: in tracking mode the track slides along the record by the total time looped, so `drift` grows. Loop long enough and the track's tail runs past `timecoder_get_safe()` and becomes unreachable by any needle position. `RELATIVE OFF` (re-asserting tracking) is the recovery. An armed loop only wraps the position while it's actually inside `[start, end)` - a `SEEK`/`GOTO_CUE`/`PLAY_CUE` landing outside the range plays on normally with the loop still armed, rather than fighting the jump every buffer or cancelling the loop outright.
 
 **`LOOP OFF`** — disarm the loop (`player_clear_loop()`), no jump - the only thing that actually disarms one (`SEEK`/`GOTO_CUE`/`PLAY_CUE` do not). No reply; read back via STATUS's `loopActive`/`loopStart`/`loopEnd`.

@@ -294,7 +294,11 @@ void player_set_relative_mode(struct player *pl, bool on)
          * not merely at the next load, or the deck reads wrong until one happens. */
         pl->offset = pl->cue_offset;
         pl->recalibrate = true;
-        pl->loop_active = false; /* a loop only ever applies in relative mode */
+        /* The loop deliberately SURVIVES this now. It used to be destroyed here because the wrap
+         * rewrote `position`, which retarget() then undid - so a loop could not work in tracking
+         * mode at all. player_collect() slides `offset` instead, so it can. Resetting offset above
+         * is what makes toggling tracking off and back on the DJ's way to discard accumulated
+         * drift and get the record's own labelling back. See PROTOCOL.md's RELATIVE. */
     }
 }
 
@@ -399,6 +403,13 @@ double player_get_cue_point_elapsed(struct player *pl)
     return pl->cue_point - pl->offset;
 }
 
+/* See player.h's own doc comment. Signed: positive means the track has slid FORWARD along the
+ * timecode record, so track 0:00 now sits this far into the vinyl. */
+double player_get_offset_drift(struct player *pl)
+{
+    return pl->offset - pl->cue_offset;
+}
+
 /* Reported back via STATUS - see PROTOCOL.md and player.h's own doc comment. */
 bool player_get_loop_active(struct player *pl)
 {
@@ -486,9 +497,13 @@ void player_set_track(struct player *pl, struct track *track)
      *
      * Absolute mode's offset is a property of the TIMECODE RECORD, not of whatever was played
      * last, so a load is exactly the point to put it back.
+     *
+     * Unconditional since the modes were unified. It used to be gated on !relative_mode, which is
+     * precisely how the meaningless offset escaped in the first place - a deck left in relative
+     * skipped the reset entirely. A fresh track has no reason to inherit any drift, in either
+     * mode, so there is nothing left for the condition to protect.
      */
-    if (!pl->relative_mode)
-        pl->offset = pl->cue_offset;
+    pl->offset = pl->cue_offset;
 
     /* If the needle isn't currently valid, `position` is stale from a previous load - reset to
      * `offset` (track start) rather than silently starting mid-track. */
@@ -744,26 +759,55 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
         spin_unlock(&pl->lock);
     }
 
-    /* Captured before pl->position advances below - see the wraparound block's was_in_loop gate. */
-    bool was_in_loop = pl->relative_mode && pl->loop_active
+    /* Captured before pl->position advances below - see the wraparound block's was_in_loop gate.
+     * No longer gated on relative_mode: a loop applies in both modes now, only the wrap differs. */
+    bool was_in_loop = pl->loop_active
         && pl->position >= pl->loop_start && pl->position < pl->loop_end;
 
     pl->position += r;
     pl->volume = target_volume;
 
-    /* Loop wraparound (relative mode only). fmod-based, not a flat snap, so a buffer that jumps
-     * more than the loop's own length still lands at the correct phase (matters when scratching).
-     * Gated on was_in_loop (the PRE-advance position) so a deliberate SEEK/GOTO_CUE/PLAY_CUE
-     * landing outside the loop just plays on rather than fighting the jump every buffer - see
-     * DEVLOG.md for the real bug this fixes. */
+    /* Loop wraparound. fmod/floor-based, not a flat snap, so a buffer that jumps more than the
+     * loop's own length still lands at the correct phase (matters when scratching). Gated on
+     * was_in_loop (the PRE-advance position) so a deliberate SEEK/GOTO_CUE/PLAY_CUE landing
+     * outside the loop just plays on rather than fighting the jump every buffer - see DEVLOG.md
+     * for the real bug this fixes.
+     *
+     * Two wraps, because the two modes disagree about who owns `position`:
+     *
+     *   Non-tracking (relative): position free-runs from pitch and nothing else writes it, so the
+     *   wrap rewrites it directly. Unchanged behaviour.
+     *
+     *   Tracking (absolute): retarget() drags position toward the needle every cycle, so rewriting
+     *   it here would simply be undone - which is why a loop used to be impossible in this mode at
+     *   all. Slide `offset` and the loop bounds forward instead and never touch position: elapsed
+     *   is position - offset, so raising offset by one loop length drops elapsed back by exactly
+     *   that while the needle keeps driving position untouched. The loop window travels through
+     *   timecode space at whatever rate the needle is going, and stands still in track time. The
+     *   bounds move with the offset so the loop stays put in the track rather than crawling
+     *   through it. Self-correcting at any pitch: the wrap fires on position crossing loop_end
+     *   regardless of speed. See DEVLOG 2026-09-01. */
     if (was_in_loop) {
         double loop_length = pl->loop_end - pl->loop_start;
 
         if (loop_length > 0) {
-            if (pl->position >= pl->loop_end)
-                pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
-            else if (pl->position < pl->loop_start)
-                pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
+            if (pl->relative_mode) {
+                if (pl->position >= pl->loop_end)
+                    pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
+                else if (pl->position < pl->loop_start)
+                    pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
+            } else {
+                double shift = 0.0;
+
+                if (pl->position >= pl->loop_end)
+                    shift = floor((pl->position - pl->loop_start) / loop_length) * loop_length;
+                else if (pl->position < pl->loop_start)
+                    shift = -ceil((pl->loop_start - pl->position) / loop_length) * loop_length;
+
+                pl->offset += shift;
+                pl->loop_start += shift;
+                pl->loop_end += shift;
+            }
         }
     }
 }
