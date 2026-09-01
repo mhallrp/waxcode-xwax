@@ -355,6 +355,33 @@ void player_recue(struct player *pl)
     pl->offset = pl->position;
 }
 
+/*
+ * Move the position<->elapsed mapping so `elapsed` reads `to_elapsed`, WITHOUT touching `position`.
+ *
+ * Tracking mode's counterpart to writing `position` directly. retarget() drags position toward the
+ * needle every cycle, so a jump written there is undone within a buffer or two - which is why every
+ * cue and seek used to be relative-only. Moving the mapping instead sticks, because nothing else
+ * writes `offset`.
+ *
+ * Everything else held in position-space moves by the same delta, so the cue point and any armed
+ * loop keep the ELAPSED meaning they had rather than sliding through the track underneath. (Jumping
+ * to the cue point is the self-consistent case: the shift works out to leave its elapsed value
+ * exactly where it was.)
+ *
+ * The cost is drift - see player_get_offset_drift() and PROTOCOL.md's STATUS. That is inherent, not
+ * a defect: in tracking mode the needle and the track can only disagree by moving the mapping.
+ */
+static void player_rebase_offset(struct player *pl, double to_elapsed)
+{
+    double new_offset = pl->position - to_elapsed;
+    double delta = new_offset - pl->offset;
+
+    pl->offset = new_offset;
+    pl->cue_point += delta;
+    pl->loop_start += delta;
+    pl->loop_end += delta;
+}
+
 /* Shared primitive behind player_seek_to_elapsed()/player_cue() - jumps `position` and pauses,
  * unconditionally in relative mode (owner's call, 2026-08-06 - see relative_playing's own doc
  * comment). Must use spin_try_lock(), not spin_lock() - this runs on the realtime thread, and
@@ -362,7 +389,10 @@ void player_recue(struct player *pl)
 static void player_jump_to_position(struct player *pl, double to)
 {
     if (spin_try_lock(&pl->lock)) {
-        pl->position = to;
+        if (pl->relative_mode)
+            pl->position = to;
+        else
+            player_rebase_offset(pl, to - pl->offset);
         spin_unlock(&pl->lock);
     }
     pl->relative_playing = false;
@@ -385,7 +415,10 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
 void player_relocate(struct player *pl, double elapsed_seconds)
 {
     if (spin_try_lock(&pl->lock)) {
-        pl->position = pl->offset + elapsed_seconds;
+        if (pl->relative_mode)
+            pl->position = pl->offset + elapsed_seconds;
+        else
+            player_rebase_offset(pl, elapsed_seconds);
         spin_unlock(&pl->lock);
     }
 }

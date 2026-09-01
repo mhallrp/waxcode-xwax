@@ -96,6 +96,22 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 
 Switching OFF resets `offset` to `cue_offset`, which since 2026-09-01 is also the DJ's way to **discard accumulated drift** (see STATUS's `drift`) and get the record's own labelling back. It no longer clears an active loop: the loop survives the switch in both directions.
 
+### How a jump lands, in each mode
+
+`SEEK`, `RELOCATE`, `GOTO_CUE` and `PLAY_CUE` all move the deck to an elapsed time. **Since
+2026-09-01 they work in both modes**, but by different means, for the same reason `LOOP` does:
+
+- **Non-tracking (`RELATIVE ON`)** - the jump writes `position` directly. Unchanged.
+- **Tracking (`RELATIVE OFF`)** - `retarget()` would drag `position` straight back to the needle
+  within a buffer or two, which is why every cue and seek used to be relative-only. The jump moves
+  the `position`↔`elapsed` mapping instead (`player_rebase_offset()`), which sticks because nothing
+  else writes `offset`. The cue point and any armed loop shift with it, so they keep the ELAPSED
+  meaning they had rather than sliding through the track.
+
+The cost in tracking mode is `drift` (see STATUS). That is inherent rather than a defect: with the
+needle authoritative, the only way the track can sit somewhere the needle does not say is to move
+the mapping.
+
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there, unconditionally in relative mode (same pause semantics as `GOTO_CUE`). Mainly for relative-mode tap/drag-to-position. No reply.
 
 **`RELOCATE <seconds>`** — jump to an elapsed-time offset WITHOUT touching play/pause state (`player_relocate()`) - unlike `SEEK`, doesn't force a pause: whatever's currently holding (playing or paused) keeps holding. Used to keep a shrunk loop's own position inside its new bounds without interrupting playback (a `LOOP` command alone doesn't retroactively reposition - see `LOOP`'s own doc below). No reply.
