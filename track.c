@@ -334,15 +334,35 @@ struct track* track_acquire_by_import(const char *importer, const char *path)
  * Return: pointer, not NULL
  */
 
+/*
+ * The reference count is touched from several threads at once and is NOT protected by any shared
+ * lock - rig_post_track() acquires, player_set_track() and the worker release, and rig_lock() is
+ * only ever taken by interface.c. A plain `refcount++` / `refcount--` is a read-modify-write, so on
+ * ARM64 two of them racing silently lose one update.
+ *
+ * A lost decrement leaks a track, which is harmless. A lost INCREMENT is not: the count reaches
+ * zero while a reference is still held, the track is freed early, and the heap is corrupted. The
+ * crash that follows lands wherever the allocator next touches the damaged arena - which is exactly
+ * the shape of the 2026-09-01 SIGSEGV, dying inside free() -> __default_morecore() -> brk() under
+ * track_release() on the worker thread, with a track load in flight at that moment.
+ *
+ * The standard refcount ordering: RELAXED on acquire, because you must already hold a reference to
+ * take another, and ACQ_REL on release so the thread that drops the last one sees every write the
+ * others made before letting go. Builtins rather than _Atomic so the type, the struct layout and
+ * `empty`'s static initialiser all stay exactly as they were.
+ *
+ * Same family as the tr->length race (DEVLOG 2026-08-04), whose own note said it could recur
+ * elsewhere in xwax. It did.
+ */
 struct track* track_acquire_empty(void)
 {
-    empty.refcount++;
+    __atomic_add_fetch(&empty.refcount, 1, __ATOMIC_RELAXED);
     return &empty;
 }
 
 void track_acquire(struct track *t)
 {
-    t->refcount++;
+    __atomic_add_fetch(&t->refcount, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -365,17 +385,20 @@ static void terminate(struct track *t)
 
 void track_release(struct track *t)
 {
-    t->refcount--;
+    /* The RESULT of our own decrement, not a re-read of the field - see track_acquire's comment.
+     * Re-reading is a second race all by itself: another thread can change it in between, and two
+     * threads can then both see zero and both free. */
+    unsigned int remaining = __atomic_sub_fetch(&t->refcount, 1, __ATOMIC_ACQ_REL);
 
     /* When importing, a reference is held. If it's the
      * only one remaining terminate it to save resources */
 
-    if (t->refcount == 1 && t->pid != 0) {
+    if (remaining == 1 && t->pid != 0) {
         terminate(t);
         return;
     }
 
-    if (t->refcount == 0) {
+    if (remaining == 0) {
         assert(t != &empty);
         track_clear(t);
         free(t);
