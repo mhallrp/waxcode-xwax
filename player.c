@@ -532,6 +532,11 @@ void player_cue(struct player *pl)
  * that function no longer does this itself once already playing. */
 void player_cue_play(struct player *pl)
 {
+    /* Before the position write below, not after: this writes `position` directly rather than going
+     * through player_jump_to_position(), so with tracking still on retarget() would drag it back to
+     * the needle and the jump would never land. See player_play() for the rule itself. */
+    player_set_relative_mode(pl, true);
+
     if (spin_try_lock(&pl->lock)) {
         pl->position = pl->cue_point;
         spin_unlock(&pl->lock);
@@ -548,6 +553,15 @@ void player_cue_play(struct player *pl)
  * comment. */
 void player_play(struct player *pl)
 {
+    /* Starting the track from a button IS the declaration that the app is driving it, so tracking
+     * turns itself off - the DJ never picks a mode, the gesture they start with picks it. Drop the
+     * needle instead and the deck stays as it loaded, tracking, behaving like a normal record.
+     *
+     * Not merely tidier: PLAY did nothing at all with tracking on. `relative_playing` is read only
+     * by sync_to_timecode_relative(), and sync_to_timecode() overwrites `pitch` from the timecoder
+     * on the very next cycle - so both writes below were discarded. See PROTOCOL.md's PLAY.
+     */
+    player_set_relative_mode(pl, true);
     pl->relative_playing = true;
     pl->pitch = 1.0;
 }
@@ -597,6 +611,15 @@ void player_set_track(struct player *pl, struct track *track)
      * mode, so there is nothing left for the condition to protect.
      */
     pl->offset = pl->cue_offset;
+
+    /* And a fresh track starts TRACKING, whatever the last one ended as. Dropping the needle on a
+     * newly loaded track should behave like a normal record; pressing PLAY/CUEP instead turns
+     * tracking off, so the DJ's first gesture on this track decides its mode and there is no mode
+     * to choose. Set directly rather than through player_set_relative_mode(), which would try to
+     * adopt the needle's current position - meaningless here, since `offset` has just been put back
+     * to the calibration on purpose. */
+    pl->relative_mode = false;
+    pl->relative_needle_known = false;
 
     /* If the needle isn't currently valid, `position` is stale from a previous load - reset to
      * `offset` (track start) rather than silently starting mid-track. */

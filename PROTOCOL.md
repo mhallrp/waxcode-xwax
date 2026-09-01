@@ -6,6 +6,8 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 
 **`LOAD <path>`** — load a track from a bare filepath. No reply; poll STATUS for `IMPORTING` → `PLAYING`/`STOPPED`.
 
+**A load resets the deck to TRACKING** (`relative` back to 0) and puts `offset` back to the `--cue-offset` calibration, whatever the previous track ended as. That is what makes dropping the needle on a newly loaded track behave like a normal record. A client must NOT reapply a remembered mode after a load - doing so overrides the rule below on every load, which is the opposite of what it is for.
+
 **`UNLOAD`** — clear the deck back to empty, so a passthrough loop (`alsaloop`, managed by Node) can take over the DAC output. No reply; STATUS shows `EMPTY` once it takes effect. No `PASSTHRU` command exists here - passthrough lives entirely outside xwax.
 
 **`STATUS`** — replies with one of:
@@ -136,9 +138,20 @@ the mapping.
 
 **`GOTO_CUE`** — jump to the stored cue point and pause, unconditionally in relative mode (`player_cue()`). Subsumes the old, removed `CUE` command (jump to track start) - the cue point defaults to track start until `SET_CUE` is ever sent. No reply.
 
-**`PLAY_CUE`** — jump to the cue point and start playing immediately, needle up or down (`player_cue_play()`) - the one genuinely digital/software-driven playback path. No reply.
+**`PLAY_CUE`** — jump to the cue point and start playing immediately, needle up or down (`player_cue_play()`) - the one genuinely digital/software-driven playback path. **Turns tracking off** (see the rule below). Sets it before writing `position`, deliberately: this writes `position` directly rather than going through `player_jump_to_position()`, so with tracking still on `retarget()` would drag it straight back to the needle and the jump would never land. No reply.
 
-**`PLAY`** — resume digital playback from wherever the deck already is, no jump, needle up or down (`player_play()`). Unlike `PLAY_CUE`, not tied to the cue point at all - plain transport play. No reply.
+**`PLAY`** — resume digital playback from wherever the deck already is, no jump, needle up or down (`player_play()`). Unlike `PLAY_CUE`, not tied to the cue point at all - plain transport play. **Turns tracking off** (see the rule below). No reply.
+
+### The mode picks itself
+
+**A deck loads in tracking, and `PLAY`/`PLAY_CUE` turn tracking off.** The DJ never chooses a mode: the gesture they start the track with declares it.
+
+- **Drop the needle** — the deck is as it loaded, tracking, and behaves like a normal record.
+- **Press PLAY or CUEP** — that IS the statement that the app is driving this deck, so the needle drops to being a pitch/scratch controller.
+
+Not merely tidier. With tracking on, `PLAY` did nothing whatsoever: `relative_playing` is read only by `sync_to_timecode_relative()`, and `sync_to_timecode()` overwrites `pitch` from the timecoder on the very next cycle, so both of `player_play()`'s writes were discarded. `PLAY_CUE`'s jump was undone by `retarget()` for the reason given above. Both controls only became meaningful in the mode this rule moves them to.
+
+Nothing turns tracking back ON automatically - a needle drop after going digital is an ordinary DJ action, not a request to change mode. `RELATIVE OFF` remains available for that, and a `LOAD` resets to tracking anyway.
 
 **`PAUSE`** — pause at wherever the deck already is, no jump, needle up or down (`player_pause()`). The `PLAY`/`PAUSE` counterpart to `SEEK`/`GOTO_CUE`'s own pause semantics. No reply.
 
