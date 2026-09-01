@@ -144,7 +144,7 @@ the mapping.
 
 ### The mode picks itself
 
-**A deck loads in tracking, and every gesture that moves the playhead from the app turns tracking off** - `PLAY`, `PAUSE`, `PLAY_CUE`, `SEEK` and `GOTO_CUE`. The DJ never chooses a mode: the gesture they use declares it.
+**A deck loads in tracking, and `PLAY`/`PAUSE`/`PLAY_CUE` turn tracking off.** The DJ never chooses a mode: the gesture they start or stop the track with declares it.
 
 - **Drop the needle** — the deck is as it loaded, tracking, and behaves like a normal record.
 - **Press PLAY or CUEP** — that IS the statement that the app is driving this deck, so the needle drops to being a pitch/scratch controller.
@@ -155,9 +155,13 @@ Not merely tidier. With tracking on, `PLAY` and `PAUSE` did nothing whatsoever: 
 
 **The play/pause button needs no special handling for this.** STATUS's `PLAYING`/`STOPPED` comes from `player_is_active()`, which is `|pitch| > 0.01`, and with tracking on `pitch` is the needle's own. It already reads "pause" while the record turns and "play" once the needle lifts, without a client having to know which mode it is in.
 
-**Looping is the one exception, and deliberately so.** A loop is the only thing you do *while* the record plays normally, so it stays in tracking and slides `offset` instead (see `LOOP`). That makes a loop the only source of `drift` arising from an ordinary in-tracking action - everything else either flips the mode or moves nothing.
+**Positioning a paused deck declares nothing, so it does not flip.** `SEEK`, `GOTO_CUE` and `SET_CUE` all leave the mode alone. With tracking on a seek is a *preview*: it writes `position`, and `retarget()` reclaims it the moment the needle is readable. Tap to halfway, drop the needle at the start, and the track plays from the start - no harm done, because the needle is the authority and it wins.
 
-Two things that move nothing, and so never flip: `SET_CUE`, which only records a marker, and `RELOCATE`, which is loop machinery rather than a gesture the DJ made and must not change the mode underneath an active loop. **A client must not follow `SET_CUE` with a `SEEK` while tracking** - that would flip the deck out of tracking merely for marking a point, and with tracking on the playhead is not the app's to move anyway.
+Making these flip was tried and was worse: that same tap silently relocated the track, so dropping the needle at the start then played from halfway. Rebasing `offset` here was also tried, and made the seek stick as permanent drift from a gesture nobody thinks of as re-labelling the record. The plain write is correct in both modes.
+
+**Looping is the one thing that drifts while tracking, and deliberately so.** It is the only action you take *while* the record plays normally, so it stays in tracking and slides `offset` instead (see `LOOP`).
+
+`RELOCATE` is the one positioning command that does rebase in tracking mode: it is loop machinery, keeping a shrunk loop's position inside its new bounds during live tracked playback, where a plain write would just be reclaimed.
 
 The other source of `drift` is re-asserting tracking after playing digitally: `RELATIVE OFF` adopts the needle where it is and keeps the track where it is, which by definition leaves the two disagreeing. That is the feature, not a defect - see `RELATIVE` - and `RESET_OFFSET` is the way back.
 

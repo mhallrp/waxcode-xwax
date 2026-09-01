@@ -448,17 +448,21 @@ static void player_rebase_offset(struct player *pl, double to_elapsed)
  * spin_lock() aborts the process if called there (see DEVLOG.md for the real crash this caused). */
 static void player_jump_to_position(struct player *pl, double to)
 {
-    /* SEEK and GOTO_CUE are digital transport gestures like PLAY/PAUSE/CUEP, so they declare the
-     * app is driving and turn tracking off - see PROTOCOL.md's "The mode picks itself". Before the
-     * write, for CUEP's reason: with tracking still on, retarget() would drag `position` back to
-     * the needle and the jump would never land.
+    /* Plain `position` write in BOTH modes, and deliberately so.
      *
-     * They used to rebase `offset` instead and stay in tracking, which worked but left the deck
-     * drifted from a gesture nobody thinks of as changing the record's labelling. Looping is the
-     * one thing that should drift while tracking, because it is the one thing you genuinely do
-     * WHILE the record plays normally. */
-    player_set_relative_mode(pl, true);
-
+     * A seek happens while the deck is paused - it is a preview, not a transport gesture. With
+     * tracking on the needle owns position, so retarget() simply reclaims it: tap to halfway, drop
+     * the needle at the start, and the track plays from the start. No harm done, which is exactly
+     * right - the needle is the authority and it wins.
+     *
+     * Two wrong versions were tried first. Rebasing `offset` here made the seek STICK, leaving the
+     * deck drifted from a gesture nobody thinks of as re-labelling the record. Turning tracking off
+     * here was worse: it made that same tap silently relocate the track, so dropping the needle at
+     * the start then played from halfway - breaking the very behaviour the plain write gives for
+     * free (owner's call, 2026-09-01).
+     *
+     * PLAY/PAUSE/PLAY_CUE do flip the mode, because those start or stop playback and so genuinely
+     * declare who is driving. Positioning a paused deck declares nothing. */
     if (spin_try_lock(&pl->lock)) {
         pl->position = to;
         spin_unlock(&pl->lock);
