@@ -448,11 +448,19 @@ static void player_rebase_offset(struct player *pl, double to_elapsed)
  * spin_lock() aborts the process if called there (see DEVLOG.md for the real crash this caused). */
 static void player_jump_to_position(struct player *pl, double to)
 {
+    /* SEEK and GOTO_CUE are digital transport gestures like PLAY/PAUSE/CUEP, so they declare the
+     * app is driving and turn tracking off - see PROTOCOL.md's "The mode picks itself". Before the
+     * write, for CUEP's reason: with tracking still on, retarget() would drag `position` back to
+     * the needle and the jump would never land.
+     *
+     * They used to rebase `offset` instead and stay in tracking, which worked but left the deck
+     * drifted from a gesture nobody thinks of as changing the record's labelling. Looping is the
+     * one thing that should drift while tracking, because it is the one thing you genuinely do
+     * WHILE the record plays normally. */
+    player_set_relative_mode(pl, true);
+
     if (spin_try_lock(&pl->lock)) {
-        if (pl->relative_mode)
-            pl->position = to;
-        else
-            player_rebase_offset(pl, to - pl->offset);
+        pl->position = to;
         spin_unlock(&pl->lock);
     }
     pl->relative_playing = false;
@@ -474,6 +482,9 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
  * playing (or start it paused if it wasn't - either way, this only moves `position`). */
 void player_relocate(struct player *pl, double elapsed_seconds)
 {
+    /* Deliberately does NOT turn tracking off, unlike SEEK/GOTO_CUE above: this is loop machinery
+     * (keeping a shrunk loop's position inside its new bounds), not a gesture the DJ made, and
+     * flipping the mode underneath an active loop would be the opposite of what they asked for. */
     if (spin_try_lock(&pl->lock)) {
         if (pl->relative_mode)
             pl->position = pl->offset + elapsed_seconds;
