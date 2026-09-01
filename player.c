@@ -550,11 +550,32 @@ static int sync_to_timecode(struct player *pl)
     /* Set before the safe-zone check below, so a needle past the safe zone still counts as "signal present" here. */
     pl->timecode_valid = (timecode != -1);
 
-    /* Instruct the caller to disconnect the timecoder if the needle
-     * is outside the 'safe' zone of the record */
-
-    if (timecode != -1 && timecode > timecoder_get_safe(pl->timecoder))
-        return -1;
+    /*
+     * Past the 'safe' zone of the record - the runout. Stop trusting the POSITION, which is what
+     * the safe zone is for, but keep reading the needle.
+     *
+     * Upstream returns -1 here and the caller clears `timecode_control`, which on a laptop means
+     * "switch to internal playback, press a key to come back". On this box nothing can press that
+     * key: the only caller of player_toggle_timecode_control() is interface.c's SDL keyboard
+     * handler, and no control-socket command exposes it. So running into the runout left the deck
+     * PERMANENTLY deaf to the needle - not even a new LOAD restored it, since player_set_track()
+     * does not touch the flag. Only restarting xwax@N did.
+     *
+     * Worse, returning before the pitch read below froze `pitch` at whatever it last was, so
+     * `position` free-ran on that value indefinitely: a deck reporting PLAYING at 1.764 with
+     * elapsed climbing past the end of the track, needle lifted (owner reproduced it twice,
+     * 2026-09-01).
+     *
+     * Reading pitch anyway means a stopped or lifted needle now brings the deck to rest instead of
+     * running away, and leaving `timecode_control` alone means dropping the needle back onto real
+     * timecode resumes on its own - no restart, no recovery command needed.
+     */
+    if (timecode != -1 && timecode > timecoder_get_safe(pl->timecoder)) {
+        pl->pitch = timecoder_get_pitch(pl->timecoder);
+        pl->target_position = TARGET_UNKNOWN;
+        pl->position_known = false;
+        return 0;
+    }
 
     /* If the timecoder is alive, use the pitch from the sine wave */
 
@@ -686,6 +707,9 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
     if (pl->relative_mode) {
         sync_to_timecode_relative(pl);
     } else if (pl->timecode_control) {
+        /* sync_to_timecode() no longer returns -1 for the runout - it handles that itself, without
+         * disconnecting (see its own comment). Kept for any future failure that genuinely warrants
+         * giving up on the needle, but nothing reaches it today. */
         if (sync_to_timecode(pl) == -1)
             pl->timecode_control = false;
     }

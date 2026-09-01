@@ -13,6 +13,10 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 - `STATUS IMPORTING 0.0 0.000 <relative> 0.000 0 0.000 0.000 <elapsed> 0 <path>\n`
 - `STATUS <PLAYING|STOPPED> <remain> <pitch> <relative> <cuePoint> <loopActive> <loopStart> <loopEnd> <elapsed> <timecodeValid> <path>\n`
 
+**The runout (added 2026-09-01):** past `timecoder_get_safe()` the deck stops trusting the needle's POSITION but keeps reading it. `timecodeValid` stays 1 (there IS signal), `elapsed` stops advancing from the needle, and playback goes quiet because the absolute position is no longer known. Dropping the needle back onto real timecode resumes on its own.
+
+This used to disconnect the timecoder outright and permanently: nothing in the control protocol could re-enable it, a new `LOAD` did not, and the deck free-ran at whatever pitch was frozen at the moment it gave up. Only restarting `xwax@N` recovered it.
+
 `timecodeValid` (added 2026-08-29) is `player.timecode_valid`: the needle is down and reading a
 locked position. Deliberately not the same as `pitch != 0`, which is also false when merely paused.
 
