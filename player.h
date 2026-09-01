@@ -83,6 +83,11 @@ void player_set_timecode_control(struct player *pl, bool on);
 bool player_toggle_timecode_control(struct player *pl);
 void player_set_internal_playback(struct player *pl);
 void player_set_relative_mode(struct player *pl, bool on);
+
+/* Put the position<->elapsed mapping back to the --cue-offset calibration, so the needle's own
+ * position means what the record says again. The DJ's recovery from accumulated drift - see
+ * player_get_offset_drift() and PROTOCOL.md's RESET_OFFSET. */
+void player_reset_offset(struct player *pl);
 void player_set_loop(struct player *pl, double start_seconds, double end_seconds);
 void player_clear_loop(struct player *pl);
 

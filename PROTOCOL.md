@@ -102,6 +102,16 @@ With the needle up - or never down since relative mode began - the mapping is le
 
 It no longer clears an active loop either: the loop survives the switch in both directions.
 
+**`RESET_OFFSET`** — put the `position`↔`elapsed` mapping back to the `--cue-offset` calibration (`player_reset_offset()`), discarding accumulated `drift` (see STATUS). No reply; read back via STATUS's `drift` returning to `0.000`.
+
+**The track jumps, deliberately.** `elapsed` is `position - offset`, so restoring the calibration re-reads the needle's current position as the record's own labelling - which is the entire point. This is the DJ's recovery from having looped a track's tail past `timecoder_get_safe()`, where part of it is otherwise unreachable by any needle position.
+
+It exists as its own command because `RELATIVE OFF` no longer does it: that now preserves the track's position across the switch so the toggle is safe to press mid-set, and one control cannot do both (see `RELATIVE`).
+
+The cue point and any armed loop shift with the mapping, as everywhere else that moves `offset`, so a cue at 1:30 into the track is still at 1:30 afterwards - resyncing to the record is not a reason to lose your markers.
+
+Harmless in either mode, and with nothing loaded.
+
 ### How a jump lands, in each mode
 
 `SEEK`, `RELOCATE`, `GOTO_CUE` and `PLAY_CUE` all move the deck to an elapsed time. **Since

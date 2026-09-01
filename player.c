@@ -339,6 +339,29 @@ void player_set_relative_mode(struct player *pl, bool on)
     }
 }
 
+/*
+ * Discard accumulated drift - see PROTOCOL.md's RESET_OFFSET.
+ *
+ * The track JUMPS, deliberately: `elapsed` is position - offset, so putting offset back to the
+ * calibration re-reads the needle's current position as the record's own labelling, which is the
+ * whole point. Nothing needs to touch `position` for that, and nothing sets `recalibrate` either -
+ * in tracking mode retarget() is already converging position on the needle, and in relative mode
+ * `target_position` is TARGET_UNKNOWN, where calibrate_to_timecode_position() would assert.
+ *
+ * The cue point and any armed loop shift with the mapping, as everywhere else that moves `offset`,
+ * so a cue at 1:30 into the track is still at 1:30 afterwards. Resyncing to the record is not a
+ * reason to lose your markers.
+ */
+void player_reset_offset(struct player *pl)
+{
+    double delta = pl->cue_offset - pl->offset;
+
+    pl->offset = pl->cue_offset;
+    pl->cue_point += delta;
+    pl->loop_start += delta;
+    pl->loop_end += delta;
+}
+
 /* Activate a loop over [start_seconds, end_seconds) of elapsed time - see PROTOCOL.md's LOOP. Plain field writes: already on the realtime thread (control.c), not lock-protected. */
 void player_set_loop(struct player *pl, double start_seconds, double end_seconds)
 {

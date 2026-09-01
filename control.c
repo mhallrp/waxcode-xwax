@@ -324,6 +324,18 @@ static void handle_goto_cue(struct control *ctrl)
     player_cue(&ctrl->deck->player);
 }
 
+/* Realtime thread - safe directly, player_reset_offset() is plain field writes. */
+static void handle_reset_offset(struct control *ctrl)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: RESET_OFFSET received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: RESET_OFFSET\n");
+    player_reset_offset(&ctrl->deck->player);
+}
+
 /* Realtime thread - safe directly, player_cue_play() is a plain field write. */
 static void handle_play_cue(struct control *ctrl)
 {
@@ -472,6 +484,8 @@ static void handle_line(struct control *ctrl, char *line)
         handle_set_cue(ctrl, line + 8);
     } else if (!strcmp(line, "GOTO_CUE")) {
         handle_goto_cue(ctrl);
+    } else if (!strcmp(line, "RESET_OFFSET")) {
+        handle_reset_offset(ctrl);
     } else if (!strcmp(line, "PLAY_CUE")) {
         handle_play_cue(ctrl);
     } else if (!strcmp(line, "PLAY")) {
