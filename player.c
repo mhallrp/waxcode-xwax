@@ -231,8 +231,6 @@ void player_init(struct player *pl, unsigned int sample_rate,
     /* Nothing plays until the needle has told us where it is, not merely how fast it is going. */
     pl->position_known = false;
     pl->relative_mode = false;
-    pl->relative_needle_position = 0.0;
-    pl->relative_needle_known = false;
     pl->relative_playing = false;
     pl->loop_active = false;
     pl->loop_start = 0.0;
@@ -290,76 +288,14 @@ void player_set_internal_playback(struct player *pl)
 void player_set_relative_mode(struct player *pl, bool on)
 {
     pl->relative_mode = on;
-
-    if (on) {
-        /* Nothing known yet about where the needle is under this stretch of relative mode. */
-        pl->relative_needle_known = false;
-    } else {
-        /* Turning tracking ON: adopt the needle where it currently is and LEAVE THE TRACK WHERE IT
-         * IS PLAYING. This used to reset offset to cue_offset and snap the track to whatever the
-         * needle read, which meant the toggle could throw the track anywhere mid-set - hostile for
-         * a control the DJ is meant to reach for. Owner's call, 2026-09-01.
-         *
-         * elapsed is position - offset, so preserving it across the switch means choosing an offset
-         * relative to where position is about to land, which is the needle:
-         *
-         *     offset = needle - elapsed
-         *
-         * `position` is moved to the needle in the same breath, because in relative mode it is the
-         * free-running software position and has nothing to do with the needle's own. Setting one
-         * without the other would change elapsed, which is the exact thing being preserved.
-         *
-         * Needle up (or never down since relative mode began) leaves the mapping untouched: there
-         * is no reading to adopt, and inventing one would be worse than waiting for a needle drop
-         * to settle it authoritatively.
-         *
-         * NOTE: this deliberately no longer resets drift. See PROTOCOL.md's RELATIVE - the toggle
-         * cannot both preserve the track's position and restore the record's own labelling, and
-         * preserving position is the one that has to be safe to press mid-set. */
-        if (pl->relative_needle_known) {
-            double elapsed = pl->position - pl->offset;
-            double new_offset = pl->relative_needle_position - elapsed;
-            double delta = new_offset - pl->offset;
-
-            pl->offset = new_offset;
-            pl->position = pl->relative_needle_position;
-
-            /* Everything else held in position-space moves with the mapping, exactly as
-             * player_rebase_offset() does it, so the cue point and any armed loop keep the ELAPSED
-             * meaning they had instead of sliding through the track. */
-            pl->cue_point += delta;
-            pl->loop_start += delta;
-            pl->loop_end += delta;
-        }
-        pl->recalibrate = false;
-
-        /* The loop deliberately SURVIVES this now. It used to be destroyed here because the wrap
-         * rewrote `position`, which retarget() then undid - so a loop could not work in tracking
-         * mode at all. player_collect() slides `offset` instead, so it can. */
+    if (!on) {
+        /* Relative mode leaves `offset` wherever its last seek put it. Absolute mode's offset
+         * describes the timecode record, so it has to come back the moment relative mode ends -
+         * not merely at the next load, or the deck reads wrong until one happens. */
+        pl->offset = pl->cue_offset;
+        pl->recalibrate = true;
+        pl->loop_active = false; /* a loop only ever applies in relative mode */
     }
-}
-
-/*
- * Discard accumulated drift - see PROTOCOL.md's RESET_OFFSET.
- *
- * The track JUMPS, deliberately: `elapsed` is position - offset, so putting offset back to the
- * calibration re-reads the needle's current position as the record's own labelling, which is the
- * whole point. Nothing needs to touch `position` for that, and nothing sets `recalibrate` either -
- * in tracking mode retarget() is already converging position on the needle, and in relative mode
- * `target_position` is TARGET_UNKNOWN, where calibrate_to_timecode_position() would assert.
- *
- * The cue point and any armed loop shift with the mapping, as everywhere else that moves `offset`,
- * so a cue at 1:30 into the track is still at 1:30 afterwards. Resyncing to the record is not a
- * reason to lose your markers.
- */
-void player_reset_offset(struct player *pl)
-{
-    double delta = pl->cue_offset - pl->offset;
-
-    pl->offset = pl->cue_offset;
-    pl->cue_point += delta;
-    pl->loop_start += delta;
-    pl->loop_end += delta;
 }
 
 /* Activate a loop over [start_seconds, end_seconds) of elapsed time - see PROTOCOL.md's LOOP. Plain field writes: already on the realtime thread (control.c), not lock-protected. */
@@ -415,56 +351,12 @@ void player_recue(struct player *pl)
     pl->offset = pl->position;
 }
 
-/*
- * Move the position<->elapsed mapping so `elapsed` reads `to_elapsed`, WITHOUT touching `position`.
- *
- * Tracking mode's counterpart to writing `position` directly. retarget() drags position toward the
- * needle every cycle, so a jump written there is undone within a buffer or two - which is why every
- * cue and seek used to be relative-only. Moving the mapping instead sticks, because nothing else
- * writes `offset`.
- *
- * Everything else held in position-space moves by the same delta, so the cue point and any armed
- * loop keep the ELAPSED meaning they had rather than sliding through the track underneath. (Jumping
- * to the cue point is the self-consistent case: the shift works out to leave its elapsed value
- * exactly where it was.)
- *
- * The cost is drift - see player_get_offset_drift() and PROTOCOL.md's STATUS. That is inherent, not
- * a defect: in tracking mode the needle and the track can only disagree by moving the mapping.
- */
-static void player_rebase_offset(struct player *pl, double to_elapsed)
-{
-    double new_offset = pl->position - to_elapsed;
-    double delta = new_offset - pl->offset;
-
-    pl->offset = new_offset;
-    pl->cue_point += delta;
-    pl->loop_start += delta;
-    pl->loop_end += delta;
-}
-
 /* Shared primitive behind player_seek_to_elapsed()/player_cue() - jumps `position` and pauses,
  * unconditionally in relative mode (owner's call, 2026-08-06 - see relative_playing's own doc
  * comment). Must use spin_try_lock(), not spin_lock() - this runs on the realtime thread, and
  * spin_lock() aborts the process if called there (see DEVLOG.md for the real crash this caused). */
 static void player_jump_to_position(struct player *pl, double to)
 {
-    /* Plain `position` write in BOTH modes, and deliberately so.
-     *
-     * A seek happens while the deck is paused - it is a preview, not a transport gesture. With
-     * tracking on the needle owns position, so retarget() simply reclaims it: tap to halfway, drop
-     * the needle at the start, and the track plays from the start. No harm done, which is exactly
-     * right - the needle is the authority and it wins.
-     *
-     * Two wrong versions were tried first. Rebasing `offset` here made the seek STICK, leaving the
-     * deck drifted from a gesture nobody thinks of as re-labelling the record. Turning tracking off
-     * here was worse still: it dropped the deck into relative mode, where `relative_playing` is
-     * false after a seek and the needle CANNOT start playback at all (see its doc in player.h) - so
-     * dropping the needle did nothing whatsoever and the deck read as dead, then started at halfway
-     * on the next PLAY. The plain write gives the right behaviour for free (owner's call,
-     * 2026-09-01).
-     *
-     * PLAY/PAUSE/PLAY_CUE do flip the mode, because those start or stop playback and so genuinely
-     * declare who is driving. Positioning a paused deck declares nothing. */
     if (spin_try_lock(&pl->lock)) {
         pl->position = to;
         spin_unlock(&pl->lock);
@@ -488,14 +380,8 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
  * playing (or start it paused if it wasn't - either way, this only moves `position`). */
 void player_relocate(struct player *pl, double elapsed_seconds)
 {
-    /* Deliberately does NOT turn tracking off, unlike SEEK/GOTO_CUE above: this is loop machinery
-     * (keeping a shrunk loop's position inside its new bounds), not a gesture the DJ made, and
-     * flipping the mode underneath an active loop would be the opposite of what they asked for. */
     if (spin_try_lock(&pl->lock)) {
-        if (pl->relative_mode)
-            pl->position = pl->offset + elapsed_seconds;
-        else
-            player_rebase_offset(pl, elapsed_seconds);
+        pl->position = pl->offset + elapsed_seconds;
         spin_unlock(&pl->lock);
     }
 }
@@ -511,13 +397,6 @@ void player_set_cue_point(struct player *pl, double elapsed_seconds)
 double player_get_cue_point_elapsed(struct player *pl)
 {
     return pl->cue_point - pl->offset;
-}
-
-/* See player.h's own doc comment. Signed: positive means the track has slid FORWARD along the
- * timecode record, so track 0:00 now sits this far into the vinyl. */
-double player_get_offset_drift(struct player *pl)
-{
-    return pl->offset - pl->cue_offset;
 }
 
 /* Reported back via STATUS - see PROTOCOL.md and player.h's own doc comment. */
@@ -549,11 +428,6 @@ void player_cue(struct player *pl)
  * that function no longer does this itself once already playing. */
 void player_cue_play(struct player *pl)
 {
-    /* Before the position write below, not after: this writes `position` directly rather than going
-     * through player_jump_to_position(), so with tracking still on retarget() would drag it back to
-     * the needle and the jump would never land. See player_play() for the rule itself. */
-    player_set_relative_mode(pl, true);
-
     if (spin_try_lock(&pl->lock)) {
         pl->position = pl->cue_point;
         spin_unlock(&pl->lock);
@@ -570,15 +444,6 @@ void player_cue_play(struct player *pl)
  * comment. */
 void player_play(struct player *pl)
 {
-    /* Starting the track from a button IS the declaration that the app is driving it, so tracking
-     * turns itself off - the DJ never picks a mode, the gesture they start with picks it. Drop the
-     * needle instead and the deck stays as it loaded, tracking, behaving like a normal record.
-     *
-     * Not merely tidier: PLAY did nothing at all with tracking on. `relative_playing` is read only
-     * by sync_to_timecode_relative(), and sync_to_timecode() overwrites `pitch` from the timecoder
-     * on the very next cycle - so both writes below were discarded. See PROTOCOL.md's PLAY.
-     */
-    player_set_relative_mode(pl, true);
     pl->relative_playing = true;
     pl->pitch = 1.0;
 }
@@ -588,17 +453,6 @@ void player_play(struct player *pl)
  * needle's up" behaviour (owner's call, 2026-08-06). */
 void player_pause(struct player *pl)
 {
-    /* Same rule as player_play(), and for the same reason: pausing is a digital transport gesture,
-     * so it declares that the app is driving this deck. With tracking on it was not merely a no-op
-     * but an impossible request - `relative_playing` is read only by sync_to_timecode_relative(),
-     * and playback is the needle's to start and stop. Stopping the audio while the record keeps
-     * turning is exactly what relative mode is, so pause has to move the deck there to mean
-     * anything. See PROTOCOL.md's "The mode picks itself".
-     *
-     * Note the play/pause button needs no help from this: STATUS's PLAYING/STOPPED comes from
-     * player_is_active(), which is |pitch| > 0.01, and with tracking on pitch is the needle's. It
-     * already reads "pause" while the record turns and "play" once the needle lifts. */
-    player_set_relative_mode(pl, true);
     pl->relative_playing = false;
 }
 
@@ -632,22 +486,9 @@ void player_set_track(struct player *pl, struct track *track)
      *
      * Absolute mode's offset is a property of the TIMECODE RECORD, not of whatever was played
      * last, so a load is exactly the point to put it back.
-     *
-     * Unconditional since the modes were unified. It used to be gated on !relative_mode, which is
-     * precisely how the meaningless offset escaped in the first place - a deck left in relative
-     * skipped the reset entirely. A fresh track has no reason to inherit any drift, in either
-     * mode, so there is nothing left for the condition to protect.
      */
-    pl->offset = pl->cue_offset;
-
-    /* And a fresh track starts TRACKING, whatever the last one ended as. Dropping the needle on a
-     * newly loaded track should behave like a normal record; pressing PLAY/CUEP instead turns
-     * tracking off, so the DJ's first gesture on this track decides its mode and there is no mode
-     * to choose. Set directly rather than through player_set_relative_mode(), which would try to
-     * adopt the needle's current position - meaningless here, since `offset` has just been put back
-     * to the calibration on purpose. */
-    pl->relative_mode = false;
-    pl->relative_needle_known = false;
+    if (!pl->relative_mode)
+        pl->offset = pl->cue_offset;
 
     /* If the needle isn't currently valid, `position` is stale from a previous load - reset to
      * `offset` (track start) rather than silently starting mid-track. */
@@ -764,16 +605,6 @@ static void sync_to_timecode_relative(struct player *pl)
         pl->pitch = 0.0;
     } else if (pl->timecode_valid) {
         pl->pitch = timecoder_get_pitch(pl->timecoder);
-    }
-
-    /* Relative mode never consults the needle's absolute position - but remember it anyway, so
-     * switching tracking back on can adopt the needle where it is instead of snapping the track to
-     * it. Updated whenever the needle is readable, needle-down or not, since a deck paused with the
-     * needle resting still has a perfectly good position to adopt. */
-    if (pl->timecode_valid) {
-        pl->relative_needle_position = (double)timecode / timecoder_get_resolution(pl->timecoder)
-            + timecoder_get_pitch(pl->timecoder) * when;
-        pl->relative_needle_known = true;
     }
     /* else: needle's up while playing - hold the last known pitch (from a live reading, or the
      * 1.0 baseline set by player_play()/player_cue_play()), don't reset it. */
@@ -913,55 +744,26 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
         spin_unlock(&pl->lock);
     }
 
-    /* Captured before pl->position advances below - see the wraparound block's was_in_loop gate.
-     * No longer gated on relative_mode: a loop applies in both modes now, only the wrap differs. */
-    bool was_in_loop = pl->loop_active
+    /* Captured before pl->position advances below - see the wraparound block's was_in_loop gate. */
+    bool was_in_loop = pl->relative_mode && pl->loop_active
         && pl->position >= pl->loop_start && pl->position < pl->loop_end;
 
     pl->position += r;
     pl->volume = target_volume;
 
-    /* Loop wraparound. fmod/floor-based, not a flat snap, so a buffer that jumps more than the
-     * loop's own length still lands at the correct phase (matters when scratching). Gated on
-     * was_in_loop (the PRE-advance position) so a deliberate SEEK/GOTO_CUE/PLAY_CUE landing
-     * outside the loop just plays on rather than fighting the jump every buffer - see DEVLOG.md
-     * for the real bug this fixes.
-     *
-     * Two wraps, because the two modes disagree about who owns `position`:
-     *
-     *   Non-tracking (relative): position free-runs from pitch and nothing else writes it, so the
-     *   wrap rewrites it directly. Unchanged behaviour.
-     *
-     *   Tracking (absolute): retarget() drags position toward the needle every cycle, so rewriting
-     *   it here would simply be undone - which is why a loop used to be impossible in this mode at
-     *   all. Slide `offset` and the loop bounds forward instead and never touch position: elapsed
-     *   is position - offset, so raising offset by one loop length drops elapsed back by exactly
-     *   that while the needle keeps driving position untouched. The loop window travels through
-     *   timecode space at whatever rate the needle is going, and stands still in track time. The
-     *   bounds move with the offset so the loop stays put in the track rather than crawling
-     *   through it. Self-correcting at any pitch: the wrap fires on position crossing loop_end
-     *   regardless of speed. See DEVLOG 2026-09-01. */
+    /* Loop wraparound (relative mode only). fmod-based, not a flat snap, so a buffer that jumps
+     * more than the loop's own length still lands at the correct phase (matters when scratching).
+     * Gated on was_in_loop (the PRE-advance position) so a deliberate SEEK/GOTO_CUE/PLAY_CUE
+     * landing outside the loop just plays on rather than fighting the jump every buffer - see
+     * DEVLOG.md for the real bug this fixes. */
     if (was_in_loop) {
         double loop_length = pl->loop_end - pl->loop_start;
 
         if (loop_length > 0) {
-            if (pl->relative_mode) {
-                if (pl->position >= pl->loop_end)
-                    pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
-                else if (pl->position < pl->loop_start)
-                    pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
-            } else {
-                double shift = 0.0;
-
-                if (pl->position >= pl->loop_end)
-                    shift = floor((pl->position - pl->loop_start) / loop_length) * loop_length;
-                else if (pl->position < pl->loop_start)
-                    shift = -ceil((pl->loop_start - pl->position) / loop_length) * loop_length;
-
-                pl->offset += shift;
-                pl->loop_start += shift;
-                pl->loop_end += shift;
-            }
+            if (pl->position >= pl->loop_end)
+                pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
+            else if (pl->position < pl->loop_start)
+                pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
         }
     }
 }
