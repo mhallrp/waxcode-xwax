@@ -87,18 +87,17 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 
 ### The mode picks itself
 
-**A deck loads in tracking, and `PLAY`/`PAUSE`/`PLAY_CUE` turn tracking off.** The DJ never chooses a mode: the gesture they start or stop the track with declares it. Drop the needle and the deck behaves like a normal record; press a transport button and the needle demotes to a pitch/scratch controller.
+**A deck loads in tracking. Every command that takes over playback turns tracking off** - `PLAY`, `PAUSE`, `PLAY_CUE` and `LOOP`. The DJ never chooses a mode: the gesture they use declares it. Drop the needle and the deck behaves like a normal record; press a transport button and the needle demotes to a pitch/scratch controller.
 
 Not merely tidier — with tracking on, `PLAY` and `PAUSE` did nothing at all. `relative_playing` is read only by `sync_to_timecode_relative()`, and `sync_to_timecode()` overwrites `pitch` from the timecoder on the very next cycle, so their writes were discarded. `PLAY_CUE`'s jump was undone by `retarget()`. All three only became meaningful in the mode this rule moves them to.
 
 **Positioning a paused deck declares nothing, so it does not flip.** `SEEK`, `GOTO_CUE` and `SET_CUE` leave the mode alone. With tracking on a seek is a *preview*: `retarget()` reclaims it once the needle is readable, so tapping halfway then dropping the needle at the start plays from the start — the needle is the authority and it wins.
 
-**`LOOP` and the jump commands now work in BOTH modes**, but by different means, because the two disagree about who owns `position`:
+**`LOOP` turns tracking off too**, for the same reason as the transport commands: it takes over playback. Tracking earns its keep for cueing and skipping through a track, and by the time you are looping into a mix you have stopped needing it - nothing you do on the way out of a loop needs the needle to still own the position.
 
-- **Non-tracking** — `position` free-runs from pitch and nothing else writes it, so the jump or wrap rewrites it directly. Unchanged.
-- **Tracking** — `retarget()` would drag `position` straight back to the needle, which is why these were relative-only. The mapping moves instead: `offset` (and the cue point and loop bounds with it) slides so `elapsed` lands where asked while `position` keeps following the needle. A loop's window therefore travels through timecode space at the needle's rate and stands still in track time.
+The alternative was a loop that ran WITH tracking on, sliding `offset` on every wrap so the loop window travelled through timecode space while standing still in track time. It worked, but it meant drift, which meant a drift readout and a command to discard it. Turning tracking off instead deletes all of that, and leaves the rule with no exceptions.
 
-The cost in tracking mode is that the track slides along the record by however much was looped or jumped. `RELATIVE OFF` restores the calibration, which is currently the only way to discard it.
+`RELATIVE OFF` clears any armed loop: a loop cannot run with tracking on, so leaving it armed would only lie in STATUS.
 
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there, unconditionally in relative mode (same pause semantics as `GOTO_CUE`). Mainly for relative-mode tap/drag-to-position. No reply.
 
