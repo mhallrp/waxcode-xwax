@@ -294,7 +294,10 @@ void player_set_relative_mode(struct player *pl, bool on)
          * not merely at the next load, or the deck reads wrong until one happens. */
         pl->offset = pl->cue_offset;
         pl->recalibrate = true;
-        pl->loop_active = false; /* a loop only ever applies in relative mode */
+        /* The loop SURVIVES this now. It used to be destroyed here because the wrap rewrote
+         * `position`, which retarget() then undid, so a loop could not work in tracking mode at
+         * all. player_collect() slides `offset` instead. Resetting offset above is for now the
+         * only way to discard accumulated drift - a dedicated RESET_OFFSET comes later. */
     }
 }
 
@@ -351,6 +354,27 @@ void player_recue(struct player *pl)
     pl->offset = pl->position;
 }
 
+/*
+ * Move the position<->elapsed mapping so `elapsed` reads `to_elapsed`, WITHOUT touching `position`.
+ *
+ * Tracking mode's counterpart to writing `position` directly: retarget() drags position toward the
+ * needle every cycle, so a jump written there is undone within a buffer or two, which is why every
+ * cue and seek used to be relative-only. Nothing else writes `offset`, so moving it sticks.
+ *
+ * Everything else held in position-space moves by the same delta, so the cue point and any armed
+ * loop keep the ELAPSED meaning they had rather than sliding through the track underneath.
+ */
+static void player_rebase_offset(struct player *pl, double to_elapsed)
+{
+    double new_offset = pl->position - to_elapsed;
+    double delta = new_offset - pl->offset;
+
+    pl->offset = new_offset;
+    pl->cue_point += delta;
+    pl->loop_start += delta;
+    pl->loop_end += delta;
+}
+
 /* Shared primitive behind player_seek_to_elapsed()/player_cue() - jumps `position` and pauses,
  * unconditionally in relative mode (owner's call, 2026-08-06 - see relative_playing's own doc
  * comment). Must use spin_try_lock(), not spin_lock() - this runs on the realtime thread, and
@@ -358,7 +382,10 @@ void player_recue(struct player *pl)
 static void player_jump_to_position(struct player *pl, double to)
 {
     if (spin_try_lock(&pl->lock)) {
-        pl->position = to;
+        if (pl->relative_mode)
+            pl->position = to;
+        else
+            player_rebase_offset(pl, to - pl->offset);
         spin_unlock(&pl->lock);
     }
     pl->relative_playing = false;
@@ -381,7 +408,10 @@ void player_seek_to_elapsed(struct player *pl, double elapsed_seconds)
 void player_relocate(struct player *pl, double elapsed_seconds)
 {
     if (spin_try_lock(&pl->lock)) {
-        pl->position = pl->offset + elapsed_seconds;
+        if (pl->relative_mode)
+            pl->position = pl->offset + elapsed_seconds;
+        else
+            player_rebase_offset(pl, elapsed_seconds);
         spin_unlock(&pl->lock);
     }
 }
@@ -428,6 +458,11 @@ void player_cue(struct player *pl)
  * that function no longer does this itself once already playing. */
 void player_cue_play(struct player *pl)
 {
+    /* Before the position write below, deliberately: this writes `position` directly rather than
+     * going through player_jump_to_position(), so with tracking still on retarget() would drag it
+     * back to the needle and the jump would never land. */
+    player_set_relative_mode(pl, true);
+
     if (spin_try_lock(&pl->lock)) {
         pl->position = pl->cue_point;
         spin_unlock(&pl->lock);
@@ -444,6 +479,14 @@ void player_cue_play(struct player *pl)
  * comment. */
 void player_play(struct player *pl)
 {
+    /* Starting the track from a button IS the statement that the app is driving it, so tracking
+     * turns itself off. The DJ never picks a mode - the gesture they start with picks it. Drop the
+     * needle instead and the deck stays as it loaded, tracking, behaving like a normal record.
+     *
+     * Not merely tidier: PLAY did NOTHING with tracking on. `relative_playing` is read only by
+     * sync_to_timecode_relative(), and sync_to_timecode() overwrites `pitch` from the timecoder on
+     * the very next cycle, so both writes below were discarded. */
+    player_set_relative_mode(pl, true);
     pl->relative_playing = true;
     pl->pitch = 1.0;
 }
@@ -453,6 +496,10 @@ void player_play(struct player *pl)
  * needle's up" behaviour (owner's call, 2026-08-06). */
 void player_pause(struct player *pl)
 {
+    /* Same rule, sharper reason: with tracking on a pause was not a no-op but an IMPOSSIBLE
+     * request - playback is the needle's to start and stop. Stopping the audio while the record
+     * keeps turning is precisely what relative mode is, so pause has to move the deck there. */
+    player_set_relative_mode(pl, true);
     pl->relative_playing = false;
 }
 
@@ -487,8 +534,16 @@ void player_set_track(struct player *pl, struct track *track)
      * Absolute mode's offset is a property of the TIMECODE RECORD, not of whatever was played
      * last, so a load is exactly the point to put it back.
      */
-    if (!pl->relative_mode)
-        pl->offset = pl->cue_offset;
+    pl->offset = pl->cue_offset;
+
+    /* And a fresh track starts TRACKING. Dropping the needle on a newly loaded track should behave
+     * like a normal record; pressing PLAY/CUEP is what turns tracking off. Set directly rather than
+     * through player_set_relative_mode(), whose own reset would be redundant here.
+     *
+     * The offset reset above is unconditional now. It was gated on !relative_mode, which is exactly
+     * how a meaningless offset escaped into the next load and made every track open at its end
+     * (2026-08-28). A fresh track has no reason to inherit drift in either mode. */
+    pl->relative_mode = false;
 
     /* If the needle isn't currently valid, `position` is stale from a previous load - reset to
      * `offset` (track start) rather than silently starting mid-track. */
@@ -769,7 +824,7 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
     }
 
     /* Captured before pl->position advances below - see the wraparound block's was_in_loop gate. */
-    bool was_in_loop = pl->relative_mode && pl->loop_active
+    bool was_in_loop = pl->loop_active
         && pl->position >= pl->loop_start && pl->position < pl->loop_end;
 
     pl->position += r;
@@ -784,10 +839,31 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
         double loop_length = pl->loop_end - pl->loop_start;
 
         if (loop_length > 0) {
-            if (pl->position >= pl->loop_end)
-                pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
-            else if (pl->position < pl->loop_start)
-                pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
+            if (pl->relative_mode) {
+                /* position free-runs from pitch here and nothing else writes it, so rewrite it. */
+                if (pl->position >= pl->loop_end)
+                    pl->position = pl->loop_start + fmod(pl->position - pl->loop_start, loop_length);
+                else if (pl->position < pl->loop_start)
+                    pl->position = pl->loop_end - fmod(pl->loop_start - pl->position, loop_length);
+            } else {
+                /* Tracking: retarget() drags position toward the needle every cycle, so rewriting
+                 * it would simply be undone - which is why a loop was impossible here. Slide the
+                 * mapping instead and never touch position. elapsed is position - offset, so
+                 * raising offset by one loop length drops elapsed back by exactly that while the
+                 * needle keeps driving position. The window travels through timecode space at the
+                 * needle's own rate and stands still in track time; the bounds move with it so the
+                 * loop stays put in the track rather than crawling through it. */
+                double shift = 0.0;
+
+                if (pl->position >= pl->loop_end)
+                    shift = floor((pl->position - pl->loop_start) / loop_length) * loop_length;
+                else if (pl->position < pl->loop_start)
+                    shift = -ceil((pl->loop_start - pl->position) / loop_length) * loop_length;
+
+                pl->offset += shift;
+                pl->loop_start += shift;
+                pl->loop_end += shift;
+            }
         }
     }
 }

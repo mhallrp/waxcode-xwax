@@ -6,6 +6,8 @@ One Unix socket per deck (the socket path identifies the deck - no `<deck>` para
 
 **`LOAD <path>`** — load a track from a bare filepath. No reply; poll STATUS for `IMPORTING` → `PLAYING`/`STOPPED`.
 
+**A load resets the deck to TRACKING** (`relative` back to 0) and restores the `--cue-offset` calibration, whatever the previous track ended as. That is what makes dropping the needle on a newly loaded track behave like a normal record. A client must NOT reapply a remembered mode after a load — that overrides the rule below on every load, which is the opposite of what it is for.
+
 **`UNLOAD`** — clear the deck back to empty, so a passthrough loop (`alsaloop`, managed by Node) can take over the DAC output. No reply; STATUS shows `EMPTY` once it takes effect. No `PASSTHRU` command exists here - passthrough lives entirely outside xwax.
 
 **`STATUS`** — replies with one of:
@@ -82,6 +84,21 @@ Not persisted by xwax: it resets to 0 on restart, and the server reapplies it (s
 `deck-sensitivity.js`).
 
 **`RELATIVE ON|OFF`** — toggle relative mode (see `player_set_relative_mode()`). While ON, the needle drives live pitch/scratch whenever the deck is playing, but never starts or stops playback itself and its absolute position is never consulted - lifting it leaves the track playing instead of stopping it, at whatever pitch was last read rather than snapping back to 1.0, and dropping the needle back down doesn't resume a paused deck (owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch - see `player.h`'s `relative_playing` field). No reply; read back via STATUS's `relative` field. Switching OFF snaps to wherever the needle currently reads, not an offset-preserving continuation.
+
+### The mode picks itself
+
+**A deck loads in tracking, and `PLAY`/`PAUSE`/`PLAY_CUE` turn tracking off.** The DJ never chooses a mode: the gesture they start or stop the track with declares it. Drop the needle and the deck behaves like a normal record; press a transport button and the needle demotes to a pitch/scratch controller.
+
+Not merely tidier — with tracking on, `PLAY` and `PAUSE` did nothing at all. `relative_playing` is read only by `sync_to_timecode_relative()`, and `sync_to_timecode()` overwrites `pitch` from the timecoder on the very next cycle, so their writes were discarded. `PLAY_CUE`'s jump was undone by `retarget()`. All three only became meaningful in the mode this rule moves them to.
+
+**Positioning a paused deck declares nothing, so it does not flip.** `SEEK`, `GOTO_CUE` and `SET_CUE` leave the mode alone. With tracking on a seek is a *preview*: `retarget()` reclaims it once the needle is readable, so tapping halfway then dropping the needle at the start plays from the start — the needle is the authority and it wins.
+
+**`LOOP` and the jump commands now work in BOTH modes**, but by different means, because the two disagree about who owns `position`:
+
+- **Non-tracking** — `position` free-runs from pitch and nothing else writes it, so the jump or wrap rewrites it directly. Unchanged.
+- **Tracking** — `retarget()` would drag `position` straight back to the needle, which is why these were relative-only. The mapping moves instead: `offset` (and the cue point and loop bounds with it) slides so `elapsed` lands where asked while `position` keeps following the needle. A loop's window therefore travels through timecode space at the needle's rate and stands still in track time.
+
+The cost in tracking mode is that the track slides along the record by however much was looped or jumped. `RELATIVE OFF` restores the calibration, which is currently the only way to discard it.
 
 **`SEEK <seconds>`** — jump to an elapsed-time offset and pause there, unconditionally in relative mode (same pause semantics as `GOTO_CUE`). Mainly for relative-mode tap/drag-to-position. No reply.
 
