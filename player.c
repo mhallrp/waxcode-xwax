@@ -287,6 +287,24 @@ void player_set_internal_playback(struct player *pl)
 /* Relative mode on/off - see PROTOCOL.md's RELATIVE. Turning off reuses timecode_control's own recalibrate snap. */
 void player_set_relative_mode(struct player *pl, bool on)
 {
+    /*
+     * Leaving tracking while the needle is actually driving the deck must not stop it.
+     *
+     * In relative mode playback is `relative_playing`, which is only ever set by PLAY/PLAY_CUE.
+     * Coming from tracking nothing has set it, so it is still false from the load - and the deck
+     * fell silent the moment anything flipped the mode. Pressing a loop button on a playing record
+     * paused it instead of looping, and you had to press play to start the loop (owner-reported,
+     * 2026-09-02). The manual Tracking toggle had the same fault.
+     *
+     * player_is_active() is the honest test: in tracking mode `pitch` IS the needle's, so this asks
+     * "was the record turning". A needle that is up or still leaves the deck paused, correctly.
+     *
+     * Only on the transition INTO relative, so it cannot fight player_pause(), which flips the mode
+     * and then deliberately sets relative_playing false straight after.
+     */
+    if (on && !pl->relative_mode && player_is_active(pl))
+        pl->relative_playing = true;
+
     pl->relative_mode = on;
     if (!on) {
         /* Relative mode leaves `offset` wherever its last seek put it. Absolute mode's offset
