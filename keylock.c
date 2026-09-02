@@ -83,38 +83,70 @@ static void read_window(struct track *tr, double start, double step, unsigned n,
  * a similar part of the waveform instead of fighting it. Normalised by the candidate's own energy,
  * otherwise the loudest window wins regardless of shape.
  */
+/*
+ * Score one candidate offset: normalised correlation of its opening frames against the tail we are
+ * about to cross-fade into. Normalised by the candidate's own energy, or the loudest window wins
+ * regardless of shape.
+ */
+static double score_offset(struct keylock *kl, struct track *tr, double read, double step,
+                           unsigned length, int off, unsigned corr_step)
+{
+    double corr = 0.0, energy = 0.0;
+    unsigned s;
+
+    for (s = 0; s < KEYLOCK_OVERLAP; s += corr_step) {
+        double src = read + off + s * step, v, t;
+        signed short *ts;
+        int sa;
+
+        sa = (int)src;
+        if (src < 0.0)
+            sa--;
+        if (sa < 0 || sa >= (int)length)
+            continue;
+
+        /* Mono sum: half the arithmetic, and stereo grains want a common alignment anyway. */
+        ts = track_get_sample(tr, sa);
+        v = (double)ts[0] + ts[1];
+        t = kl->tail[s][0] + kl->tail[s][1];
+
+        corr += v * t;
+        energy += v * v;
+    }
+
+    return corr / sqrt(energy + 1.0);
+}
+
+/*
+ * Where to actually start the next grain.
+ *
+ * The ideal cursor gives the right AVERAGE rate; this picks the offset whose opening frames best
+ * match the tail, so the splice lands on a similar part of the waveform instead of fighting it.
+ * Coarse sweep first, then a sample-accurate refinement around the winner - see keylock.h for why
+ * both stages earn their place.
+ */
 static double best_alignment(struct keylock *kl, struct track *tr, double read,
                              double step, unsigned length)
 {
-    double best_score = -INFINITY, best_off = 0.0;
-    int off;
+    double best_score = -INFINITY;
+    int best_off = 0, off, lo, hi;
 
-    for (off = -KEYLOCK_SEARCH; off <= KEYLOCK_SEARCH; off += KEYLOCK_SEARCH_STEP) {
-        double corr = 0.0, energy = 0.0, score;
-        unsigned s;
+    for (off = -KEYLOCK_SEARCH; off <= KEYLOCK_SEARCH; off += KEYLOCK_SEARCH_COARSE) {
+        double score = score_offset(kl, tr, read, step, length, off, KEYLOCK_CORR_STEP);
 
-        for (s = 0; s < KEYLOCK_OVERLAP; s += KEYLOCK_CORR_STEP) {
-            double src = read + off + s * step;
-            double v, t;
-            int sa;
-            signed short *ts;
-
-            sa = (int)src;
-            if (src < 0.0)
-                sa--;
-            if (sa < 0 || sa >= (int)length)
-                continue;
-
-            /* Mono sum: half the arithmetic, and stereo grains want a common alignment anyway. */
-            ts = track_get_sample(tr, sa);
-            v = (double)ts[0] + ts[1];
-            t = kl->tail[s][0] + kl->tail[s][1];
-
-            corr += v * t;
-            energy += v * v;
+        if (score > best_score) {
+            best_score = score;
+            best_off = off;
         }
+    }
 
-        score = corr / sqrt(energy + 1.0);
+    lo = best_off - KEYLOCK_SEARCH_COARSE;
+    hi = best_off + KEYLOCK_SEARCH_COARSE;
+    best_score = -INFINITY;
+
+    for (off = lo; off <= hi; off += KEYLOCK_SEARCH_FINE) {
+        double score = score_offset(kl, tr, read, step, length, off, KEYLOCK_CORR_STEP_FINE);
+
         if (score > best_score) {
             best_score = score;
             best_off = off;

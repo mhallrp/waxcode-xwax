@@ -39,16 +39,37 @@
  */
 #define KEYLOCK_GRAIN 512
 
-/* Cross-fade between grains, in output samples. */
-#define KEYLOCK_OVERLAP 128
+/*
+ * Cross-fade between grains, in output samples.
+ *
+ * 256 (5.3ms), raised from 128 on hearing it: a cross-fade shorter than one period of the material
+ * cannot smooth a mismatch in that material, and 128 samples is under one period of anything below
+ * ~375Hz - which is most of a pad.
+ */
+#define KEYLOCK_OVERLAP 256
 
-/* WSOLA alignment search, +/- source samples around the ideal hop. */
-#define KEYLOCK_SEARCH 128
+/*
+ * WSOLA alignment search, +/- source samples around the ideal hop.
+ *
+ * 512 (~10.7ms), raised from 128 on hearing it wobble on sustained melodic content at +/-8%
+ * (owner-reported, 2026-09-02). The search can only phase-align to a period it can actually see:
+ * +/-128 samples is +/-2.7ms, while a 100Hz pad note has a 480-sample period. Given less than half a
+ * cycle to look at, the correlation picks whatever is least bad and the alignment error alternates
+ * grain to grain - which is heard as a wobble at the grain rate rather than as a click. 512 covers
+ * fundamentals down to ~47Hz.
+ */
+#define KEYLOCK_SEARCH 512
 
-/* Coarse search: correlate every Nth candidate and every Nth sample. Full resolution buys nothing
- * audible here and costs 8x the arithmetic in the realtime thread. */
-#define KEYLOCK_SEARCH_STEP 8
+/*
+ * Two-stage search: sweep the whole range coarsely, then refine to sample accuracy around the
+ * winner. A single coarse pass is what the wide range would otherwise cost, and coarse alone is not
+ * enough - at 1kHz a 48-sample period means an 8-sample step is already 60 degrees of phase error,
+ * which is precisely the residual that pads expose.
+ */
+#define KEYLOCK_SEARCH_COARSE 16
+#define KEYLOCK_SEARCH_FINE 1
 #define KEYLOCK_CORR_STEP 4
+#define KEYLOCK_CORR_STEP_FINE 2
 
 /* Must exceed KEYLOCK_GRAIN plus the largest audio block we are ever asked for. */
 #define KEYLOCK_FIFO 2048
