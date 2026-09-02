@@ -381,11 +381,25 @@ static void player_rebase_offset(struct player *pl, double to_elapsed)
  * spin_lock() aborts the process if called there (see DEVLOG.md for the real crash this caused). */
 static void player_jump_to_position(struct player *pl, double to)
 {
+    /*
+     * Plain `position` write in BOTH modes, and deliberately so.
+     *
+     * A seek happens while the deck is paused - it is a PREVIEW, not a transport gesture. With
+     * tracking on the needle owns position, so retarget() simply reclaims it: tap halfway, drop the
+     * needle at the start, and the track plays from the start. No harm done, which is exactly
+     * right - the needle is the authority and it wins.
+     *
+     * Rebasing `offset` here was tried and is wrong: it makes the seek STICK, so looking through a
+     * waveform at your desk while paused silently relocates the record, and dropping the needle
+     * then plays from wherever you had scrolled to rather than from the needle (owner-reported,
+     * 2026-09-01 and again 2026-09-02 when this regressed). Turning tracking off here is worse
+     * still - see PROTOCOL.md.
+     *
+     * player_relocate() below DOES rebase, because it is loop machinery running during live tracked
+     * playback, where a plain write would just be reclaimed.
+     */
     if (spin_try_lock(&pl->lock)) {
-        if (pl->relative_mode)
-            pl->position = to;
-        else
-            player_rebase_offset(pl, to - pl->offset);
+        pl->position = to;
         spin_unlock(&pl->lock);
     }
     pl->relative_playing = false;
