@@ -116,3 +116,20 @@ The alternative was a loop that ran WITH tracking on, sliding `offset` on every 
 **`LOOP <start> <end>`** — loop the elapsed-time range `[start, end)` (`player_set_loop()`). Caller decides the range (e.g. one bar from the app's beat grid); only takes effect in relative mode. An armed loop only wraps the position while it's actually inside `[start, end)` - a `SEEK`/`GOTO_CUE`/`PLAY_CUE` landing outside the range plays on normally with the loop still armed, rather than fighting the jump every buffer or cancelling the loop outright.
 
 **`LOOP OFF`** — disarm the loop (`player_clear_loop()`), no jump - the only thing that actually disarms one (`SEEK`/`GOTO_CUE`/`PLAY_CUE` do not). No reply; read back via STATUS's `loopActive`/`loopStart`/`loopEnd`.
+
+## KEYLOCK ON | KEYLOCK OFF
+
+Key lock, a.k.a. master tempo: hold the track's own pitch while the platter changes tempo.
+
+Nothing to do with musical key DETECTION despite the name - "key" here means perceived pitch. No
+analysis runs, nothing is cached, and the deck never needs to know what key a track is in.
+
+The reference is always the track's recorded pitch (0.0 on the fader), never the pitch in force when
+the command arrived. Start a track at +2% with key lock on and it plays 2% faster at its original
+pitch.
+
+Engages only for steady forward playback, 0.5x to 2.0x. Outside that - scratching, reverse, stopped -
+playback silently falls back to ordinary varispeed and returns to key lock on its own once the
+platter settles. Off by default, per deck, and not remembered across a track load.
+
+No reply. See keylock.h for the algorithm.

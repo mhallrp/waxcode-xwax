@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 
+#include "keylock.h"
 #include "spin.h"
 #include "track.h"
 
@@ -62,7 +63,12 @@ struct player {
     double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
     double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
+
+    bool key_lock; /* hold the track's ORIGINAL pitch while the platter changes tempo - see keylock.h */
+    struct keylock keylock;
 };
+
+void player_set_key_lock(struct player *pl, bool on);
 
 void player_init(struct player *pl, unsigned int sample_rate,
                  struct track *track, struct timecoder *timecoder,

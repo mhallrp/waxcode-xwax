@@ -56,6 +56,7 @@ OBJS = control.o \
 	excrate.o \
 	external.o \
 	index.o \
+	keylock.o \
 	riaa.o \
 	interface.o \
 	library.o \

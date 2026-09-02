@@ -268,6 +268,18 @@ static void handle_relative(struct control *ctrl, bool on)
     player_set_relative_mode(&ctrl->deck->player, on);
 }
 
+/* Realtime thread - safe directly, player_set_key_lock() only writes fields and clears grain state. */
+static void handle_key_lock(struct control *ctrl, bool on)
+{
+    if (ctrl->deck == NULL) {
+        fprintf(stderr, "control: KEYLOCK received before a deck was assigned\n");
+        return;
+    }
+
+    fprintf(stderr, "control: KEYLOCK %s\n", on ? "ON" : "OFF");
+    player_set_key_lock(&ctrl->deck->player, on);
+}
+
 /* Realtime thread - safe directly, player_seek_to_elapsed() is a plain field write. */
 static void handle_seek(struct control *ctrl, const char *args)
 {
@@ -495,6 +507,10 @@ static void handle_line(struct control *ctrl, char *line)
         handle_relative(ctrl, true);
     } else if (!strcmp(line, "RELATIVE OFF")) {
         handle_relative(ctrl, false);
+    } else if (!strcmp(line, "KEYLOCK ON")) {
+        handle_key_lock(ctrl, true);
+    } else if (!strcmp(line, "KEYLOCK OFF")) {
+        handle_key_lock(ctrl, false);
     } else if (!strncmp(line, "LOOP ", 5)) {
         handle_loop(ctrl, line + 5);
     } else {

@@ -26,6 +26,8 @@
 #include <unistd.h>
 
 #include "device.h"
+#include "interpolate.h"
+#include "keylock.h"
 #include "player.h"
 #include "track.h"
 #include "timecoder.h"
@@ -60,19 +62,6 @@
  * Return: the cubic interpolation of the sample at position 2 + mu
  */
 
-static inline double cubic_interpolate(signed short y[4], double mu)
-{
-    signed long a0, a1, a2, a3;
-    double mu2;
-
-    mu2 = SQ(mu);
-    a0 = y[3] - y[2] - y[0] + y[1];
-    a1 = y[0] - y[1] - a0;
-    a2 = y[2] - y[0];
-    a3 = y[1];
-
-    return (mu * mu2 * a0) + (mu2 * a1) + (mu * a2) + a3;
-}
 
 /*
  * Return: Random dither, between -0.5 and 0.5
@@ -240,6 +229,9 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
     pl->volume = 0.0;
+
+    pl->key_lock = false;
+    keylock_init(&pl->keylock);
 }
 
 /*
@@ -285,6 +277,22 @@ void player_set_internal_playback(struct player *pl)
 }
 
 /* Relative mode on/off - see PROTOCOL.md's RELATIVE. Turning off reuses timecode_control's own recalibrate snap. */
+/*
+ * Turn key lock on or off for this deck.
+ *
+ * Resets the grain engine rather than cross-fading out of it. Switching is a deliberate act, not
+ * something that happens mid-phrase, and a cross-fade here would buy a click's worth of polish for
+ * real state to get wrong.
+ */
+void player_set_key_lock(struct player *pl, bool on)
+{
+    if (on == pl->key_lock)
+        return;
+
+    pl->key_lock = on;
+    keylock_reset(&pl->keylock);
+}
+
 void player_set_relative_mode(struct player *pl, bool on)
 {
     /*
@@ -835,7 +843,15 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
 
     if (position_unknown || !spin_try_lock(&pl->lock)) {
         r = build_silence(pcm, samples, pl->sample_dt, pitch);
+    } else if (pl->key_lock && keylock_applicable(pitch) && pl->track->rate > 0) {
+        r = keylock_build(&pl->keylock, pcm, samples, pl->sample_dt, pl->track,
+                          pl->position - pl->offset, pitch,
+                          pl->volume, target_volume);
+        spin_unlock(&pl->lock);
     } else {
+        /* Scratching, reverse, stopped, or key lock simply off. Reset so that re-engaging starts
+         * from a clean tail instead of splicing onto whatever the last locked grain left behind. */
+        keylock_reset(&pl->keylock);
         r = build_pcm(pcm, samples, pl->sample_dt, pl->track,
                       pl->position - pl->offset, pitch,
                       pl->volume, target_volume);
