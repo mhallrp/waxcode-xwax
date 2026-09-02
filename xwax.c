@@ -82,6 +82,7 @@ static void usage(FILE *fd)
       "  --rtprio <n>        Real-time priority (0 for no priority, default %d)\n"
       "  --geometry <s>      Set display geometry (see man page)\n"
       "  --no-decor          Request a window with no decorations\n"
+      "  --no-interface      Run headless: no SDL window, no drawing\n"
       "  -h, --help          Display this message to stdout and exit\n\n",
       DEFAULT_PRIORITY);
 
@@ -202,7 +203,7 @@ int main(int argc, const char *argv[])
     int rc = -1, n, priority;
     const char *scanner, *geo;
     char *endptr;
-    bool use_mlock, decor;
+    bool use_mlock, decor, interface;
 
     struct library library;
 
@@ -246,6 +247,7 @@ int main(int argc, const char *argv[])
     ndeck = 0;
     geo = "";
     decor = true;
+    interface = true;
     nctl = 0;
     priority = DEFAULT_PRIORITY;
     importer = DEFAULT_IMPORTER;
@@ -631,6 +633,13 @@ int main(int argc, const char *argv[])
             argv++;
             argc--;
 
+        } else if (!strcmp(argv[0], "--no-interface")) {
+
+            interface = false;
+
+            argv++;
+            argc--;
+
         } else if (!strcmp(argv[0], "--import")) {
 
             /* Importer script for subsequent decks */
@@ -774,7 +783,24 @@ int main(int argc, const char *argv[])
         goto out_rt;
     }
 
-    if (interface_start(&library, geo, decor) == -1)
+    /*
+     * Headless: skip SDL entirely.
+     *
+     * On a box with no screen the interface is pure cost. Measured on the shipping hardware with
+     * NOTHING loaded or playing: 17% and 22% of a core for the two decks, drawing a 1280x960
+     * window to SDL's dummy driver that nobody will ever see.
+     *
+     * Worse than wasteful, it is in the way. interface.c's event loop holds the RIG LOCK across
+     * every draw(), and rig_main() must take that same lock to service the control socket - so
+     * while a deck is drawing, it is not calling accept(). With BACKLOG at 1 that made connects
+     * fail outright with EAGAIN: on 2026-09-02, the first time both decks ran at once, LOAD never
+     * reached xwax and the deck looked dead while the process was perfectly healthy.
+     *
+     * rig has no functional dependency on the interface - its own comment says it "does very little
+     * on its behalf" - so skipping it leaves the rig lock uncontended rather than merely less
+     * contended. It also removes the SDL threads, which appeared in the 2026-09-01 SIGSEGV too.
+     */
+    if (interface && interface_start(&library, geo, decor) == -1)
         goto out_rt;
 
     for (n = 0; n < ndeck; n++) {
@@ -793,7 +819,8 @@ int main(int argc, const char *argv[])
     fprintf(stderr, "Exiting cleanly...\n");
 
 out_interface:
-    interface_stop();
+    if (interface)
+        interface_stop();
 out_rt:
     rt_stop(&rt);
 
