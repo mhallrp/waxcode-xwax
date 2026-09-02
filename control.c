@@ -39,7 +39,22 @@
 #include "realtime.h"
 
 #define MAX_LINE 1024
-#define BACKLOG 1
+/*
+ * Pending connections the kernel will hold between accept() calls.
+ *
+ * Was 1, which is zero tolerance: a unix-socket connect() returns EAGAIN the moment the backlog is
+ * full. The server opens a NEW connection per command while also holding a persistent poller
+ * connection, and each new one replaces the poller, which then reconnects - so a single LOAD
+ * produces a burst of connects. Fine while the rig thread polls promptly; not fine once a second
+ * deck is running and competing for CPU.
+ *
+ * First seen 2026-09-02, the first time both decks ran at once: every command on deck 1 failed with
+ * "connect EAGAIN /tmp/xwax-deck1.sock", so LOAD never reached xwax at all and the deck looked dead
+ * while the process was perfectly healthy.
+ *
+ * Cheap to be generous - the kernel allocates nothing until a connection actually arrives.
+ */
+#define BACKLOG 16
 
 struct control {
     struct deck *deck;
