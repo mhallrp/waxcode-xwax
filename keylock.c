@@ -44,7 +44,14 @@ void keylock_clear(struct keylock *kl)
 void keylock_reset(struct keylock *kl)
 {
     /* Steadiness deliberately NOT cleared: this is called on every bypassed block, and zeroing it
-     * there would stop the timer ever accumulating, so key lock could never engage at all. */
+     * there would stop the timer ever accumulating, so key lock could never engage at all.
+     *
+     * Guarded on `primed` for the same reason - this runs on every bypassed block, and resetting a
+     * stretcher that is already idle hundreds of times a second is pure work on the realtime
+     * thread. Once is enough. */
+    if (!kl->primed)
+        return;
+
     kl->primed = false;
     if (kl->rb != NULL)
         rubberband_reset(kl->rb);
@@ -60,11 +67,27 @@ bool keylock_applicable(struct keylock *kl, double pitch, double dt)
         kl->steady_for += dt;
     kl->last_pitch = pitch;
 
-    if (pitch < 0.5 || pitch > 2.0)
+    if (pitch < 0.5 || pitch > 2.0) {
+        kl->engaged = false;
         return false;
+    }
 
-    /* Near nominal there is nothing to correct - see KEYLOCK_DEADBAND. */
-    if (fabs(pitch - 1.0) <= KEYLOCK_DEADBAND)
+    /*
+     * Latched with hysteresis - see KEYLOCK_ENGAGE. A single threshold is crossed back and forth by
+     * the platter's own wow, and switching engine on every crossing is what made the noise.
+     */
+    {
+        double off_nominal = fabs(pitch - 1.0);
+
+        if (kl->engaged) {
+            if (off_nominal < KEYLOCK_DISENGAGE)
+                kl->engaged = false;
+        } else if (off_nominal > KEYLOCK_ENGAGE) {
+            kl->engaged = true;
+        }
+    }
+
+    if (!kl->engaged)
         return false;
 
     return kl->steady_for >= KEYLOCK_STEADY_SECONDS;

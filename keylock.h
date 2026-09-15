@@ -45,11 +45,26 @@
  * How far from nominal speed the platter must be before the engine is used at all.
  *
  * At 1.0 there is nothing to correct: tempo and pitch are already the recording's own. Running a
- * stretcher anyway can only add its own artefacts to a signal that needed none. 0.5% is 8.6 cents -
- * inaudible as a pitch error, and far below any deliberate nudge (owner-reported 2026-09-15: the
- * old SOLA comb-filtered here, and plain varispeed was audibly cleaner).
+ * stretcher anyway can only add its own artefacts to a signal that needed none. These are 0.4% and
+ * 1.2% - 7 and 21 cents, both inaudible as pitch error and far below any deliberate nudge.
+ *
+ * This is how far from nominal the platter must fall before key lock lets go...
  */
-#define KEYLOCK_DEADBAND 0.005
+#define KEYLOCK_DISENGAGE 0.004
+
+/*
+ * ...and how far it must get before engaging again. The gap between the two is hysteresis, and it
+ * is not optional.
+ *
+ * A platter wows by around 0.3% once per revolution, so a fader parked anywhere near a single
+ * threshold has its real pitch wandering back and forth ACROSS it. Without hysteresis that switched
+ * between varispeed and a freshly-reset stretcher hundreds of times a second, each switch emitting
+ * a partial block while the stretcher re-primed - which is not a subtle artefact, it is loud
+ * electronic noise, and it is what the owner heard around 0.0 (2026-09-15).
+ *
+ * The band between them is wide enough to swallow wow whole.
+ */
+#define KEYLOCK_ENGAGE 0.012
 
 /*
  * How steady the platter must be before key lock engages, and for how long.
@@ -69,6 +84,7 @@ struct keylock {
     RubberBandState rb;
     unsigned int rate;      /* what rb was built for; rebuilt if a track differs */
     bool primed;            /* fed enough to have started producing */
+    bool engaged;           /* latched, with hysteresis - see KEYLOCK_ENGAGE */
     double read;            /* source cursor, in samples, at the NATIVE rate */
     double expect;          /* elapsed we expect next call, for jump detection */
     double steady_for;      /* seconds the speed has held still */
