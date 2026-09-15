@@ -45,6 +45,10 @@ CFLAGS += -Wall
 CPPFLAGS += -MMD -MP
 LDFLAGS ?= -O3
 
+# Key lock's time-stretching - see keylock.h for why this is a library rather than our own.
+CFLAGS += $(shell pkg-config --cflags rubberband)
+LDLIBS += $(shell pkg-config --libs rubberband)
+
 # Core objects and libraries
 
 OBJS = control.o \

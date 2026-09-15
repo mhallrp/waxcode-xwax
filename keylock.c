@@ -9,27 +9,51 @@
 #include "interpolate.h"
 #include "keylock.h"
 
+/*
+ * Faster engine, short window, threading off.
+ *
+ * EngineFiner sounds better on a bounce but is far heavier, and this runs on the realtime thread of
+ * a Pi driving two decks. ThreadingNever because xwax already owns its realtime thread and a
+ * library spawning its own inside it is a scheduling problem, not a speedup. WindowShort keeps the
+ * latency a DVS can least afford down.
+ */
+static const RubberBandOptions KEYLOCK_OPTIONS =
+    RubberBandOptionProcessRealTime
+    | RubberBandOptionEngineFaster
+    | RubberBandOptionWindowShort
+    | RubberBandOptionThreadingNever
+    | RubberBandOptionTransientsCrisp;
+
 void keylock_init(struct keylock *kl)
 {
     memset(kl, 0, sizeof *kl);
+    for (int c = 0; c < KEYLOCK_CHANNELS; c++) {
+        kl->in_ptr[c] = kl->in[c];
+        kl->out_ptr[c] = kl->out[c];
+    }
+}
+
+void keylock_clear(struct keylock *kl)
+{
+    if (kl->rb != NULL) {
+        rubberband_delete(kl->rb);
+        kl->rb = NULL;
+    }
 }
 
 void keylock_reset(struct keylock *kl)
 {
-    /* Steadiness deliberately NOT cleared here: this is called on every bypassed block, and
-     * zeroing it there would mean the timer could never accumulate and key lock could never
-     * engage at all. */
-    /* No memset: `primed` false means the tail is never read, so clearing it would be busywork on
-     * the realtime thread. This is called on every block that runs unlocked. */
+    /* Steadiness deliberately NOT cleared: this is called on every bypassed block, and zeroing it
+     * there would stop the timer ever accumulating, so key lock could never engage at all. */
     kl->primed = false;
-    kl->fill = 0;
-    kl->head = 0;
+    if (kl->rb != NULL)
+        rubberband_reset(kl->rb);
 }
 
 bool keylock_applicable(struct keylock *kl, double pitch, double dt)
 {
-    /* Steadiness is tracked whatever the speed, so a scrub that happens to pass through the
-     * working range does not arrive already looking settled. */
+    /* Tracked whatever the speed, so a scrub passing through the working range does not arrive
+     * already looking settled. */
     if (fabs(pitch - kl->last_pitch) > KEYLOCK_STEADY_TOLERANCE)
         kl->steady_for = 0.0;
     else
@@ -39,13 +63,10 @@ bool keylock_applicable(struct keylock *kl, double pitch, double dt)
     if (pitch < 0.5 || pitch > 2.0)
         return false;
 
-    /* Near nominal there is nothing to correct, and correcting anyway comb-filters the output -
-     * see KEYLOCK_DEADBAND. player_collect() resets the grain engine on this path, so re-entering
-     * above the deadband starts from a clean tail rather than splicing onto a stale one. */
+    /* Near nominal there is nothing to correct - see KEYLOCK_DEADBAND. */
     if (fabs(pitch - 1.0) <= KEYLOCK_DEADBAND)
         return false;
 
-    /* Playback, not a scrub passing through - see KEYLOCK_STEADY_SECONDS. */
     return kl->steady_for >= KEYLOCK_STEADY_SECONDS;
 }
 
@@ -58,16 +79,13 @@ static inline signed short clamp(double v)
     return (signed short)v;
 }
 
-/*
- * Read `n` frames from the track starting at source sample `start`, advancing `step` per frame.
- */
-static void read_window(struct track *tr, double start, double step, unsigned n,
-                        float out[][KEYLOCK_CHANNELS], unsigned length)
+/* Reads `n` frames from the track at its NATIVE rate - which is what preserves pitch. */
+static void read_native(struct track *tr, double start, double step, unsigned n,
+                        float in[KEYLOCK_CHANNELS][KEYLOCK_FEED], unsigned length)
 {
     double sample = start;
-    unsigned s;
 
-    for (s = 0; s < n; s++) {
+    for (unsigned s = 0; s < n; s++) {
         signed short i[KEYLOCK_CHANNELS][4];
         int sa, q, c;
         double f;
@@ -89,175 +107,85 @@ static void read_window(struct track *tr, double start, double step, unsigned n,
             }
         }
 
+        /* Rubber Band wants float in -1..1, planar. */
         for (c = 0; c < KEYLOCK_CHANNELS; c++)
-            out[s][c] = (float)cubic_interpolate(i[c], f);
+            in[c][s] = (float)(cubic_interpolate(i[c], f) / 32768.0);
 
         sample += step;
     }
 }
 
-/*
- * Where to actually start the next grain.
- *
- * The ideal cursor gives the right AVERAGE rate; this picks the offset within +/-KEYLOCK_SEARCH
- * whose opening frames best match the tail we are about to cross-fade into, so the splice lands on
- * a similar part of the waveform instead of fighting it. Normalised by the candidate's own energy,
- * otherwise the loudest window wins regardless of shape.
- */
-/*
- * Score one candidate offset: normalised correlation of its opening frames against the tail we are
- * about to cross-fade into. Normalised by the candidate's own energy, or the loudest window wins
- * regardless of shape.
- */
-static double score_offset(struct keylock *kl, struct track *tr, double read, double step,
-                           unsigned length, int off, unsigned corr_step)
+static bool ensure_stretcher(struct keylock *kl, unsigned int rate)
 {
-    double corr = 0.0, energy = 0.0;
-    unsigned s;
+    if (kl->rb != NULL && kl->rate == rate)
+        return true;
 
-    for (s = 0; s < KEYLOCK_OVERLAP; s += corr_step) {
-        double src = read + off + s * step, v, t;
-        signed short *ts;
-        int sa;
-
-        sa = (int)src;
-        if (src < 0.0)
-            sa--;
-        if (sa < 0 || sa >= (int)length)
-            continue;
-
-        /* Mono sum: half the arithmetic, and stereo grains want a common alignment anyway. */
-        ts = track_get_sample(tr, sa);
-        v = (double)ts[0] + ts[1];
-        t = kl->tail[s][0] + kl->tail[s][1];
-
-        corr += v * t;
-        energy += v * v;
-    }
-
-    return corr / sqrt(energy + 1.0);
-}
-
-/*
- * Where to actually start the next grain.
- *
- * The ideal cursor gives the right AVERAGE rate; this picks the offset whose opening frames best
- * match the tail, so the splice lands on a similar part of the waveform instead of fighting it.
- * Coarse sweep first, then a sample-accurate refinement around the winner - see keylock.h for why
- * both stages earn their place.
- */
-static double best_alignment(struct keylock *kl, struct track *tr, double read,
-                             double step, unsigned length)
-{
-    double best_score = -INFINITY;
-    int best_off = 0, off, lo, hi;
-
-    for (off = -KEYLOCK_SEARCH; off <= KEYLOCK_SEARCH; off += KEYLOCK_SEARCH_COARSE) {
-        double score = score_offset(kl, tr, read, step, length, off, KEYLOCK_CORR_STEP);
-
-        if (score > best_score) {
-            best_score = score;
-            best_off = off;
-        }
-    }
-
-    lo = best_off - KEYLOCK_SEARCH_COARSE;
-    hi = best_off + KEYLOCK_SEARCH_COARSE;
-    best_score = -INFINITY;
-
-    for (off = lo; off <= hi; off += KEYLOCK_SEARCH_FINE) {
-        double score = score_offset(kl, tr, read, step, length, off, KEYLOCK_CORR_STEP_FINE);
-
-        if (score > best_score) {
-            best_score = score;
-            best_off = off;
-        }
-    }
-
-    return read + best_off;
-}
-
-/*
- * Generate one grain into the fifo.
- *
- * `step` is source samples per output frame at NATIVE pitch - sample-rate conversion only, which is
- * what keeps pitch unchanged. `hop` is how far the ideal cursor moves between grains, and carries
- * the whole tempo change.
- */
-static void make_grain(struct keylock *kl, struct track *tr, double step, double hop)
-{
-    unsigned length, s;
-    int c;
-    double read;
-
-    /* Paired with track.c's __ATOMIC_RELEASE store on tr->length - see that comment. */
-    length = __atomic_load_n(&tr->length, __ATOMIC_ACQUIRE);
-
-    read = kl->primed ? best_alignment(kl, tr, kl->read, step, length) : kl->read;
-    read_window(tr, read, step, KEYLOCK_GRAIN + KEYLOCK_OVERLAP, kl->win, length);
-
-    if (kl->primed) {
-        for (s = 0; s < KEYLOCK_OVERLAP; s++) {
-            float w = (float)s / KEYLOCK_OVERLAP;
-
-            for (c = 0; c < KEYLOCK_CHANNELS; c++)
-                kl->win[s][c] = kl->tail[s][c] * (1.0f - w) + kl->win[s][c] * w;
-        }
-    }
-
-    for (s = 0; s < KEYLOCK_GRAIN; s++) {
-        unsigned w = (kl->head + kl->fill + s) % KEYLOCK_FIFO;
-
-        for (c = 0; c < KEYLOCK_CHANNELS; c++)
-            kl->fifo[w][c] = clamp(kl->win[s][c]);
-    }
-    kl->fill += KEYLOCK_GRAIN;
-
-    for (s = 0; s < KEYLOCK_OVERLAP; s++)
-        for (c = 0; c < KEYLOCK_CHANNELS; c++)
-            kl->tail[s][c] = kl->win[KEYLOCK_GRAIN + s][c];
-
-    /* Advance the IDEAL cursor by exactly the hop. The search offset above is deliberately not
-     * folded back in - if it were, each grain's alignment nudge would accumulate and playback would
-     * drift away from the position the rest of the player believes it is at. */
-    kl->read += hop;
-    kl->primed = true;
+    keylock_clear(kl);
+    kl->rb = rubberband_new(rate, KEYLOCK_CHANNELS, KEYLOCK_OPTIONS, 1.0, 1.0);
+    if (kl->rb == NULL)
+        return false;
+    /* Told up front so it never allocates on the realtime thread. */
+    rubberband_set_max_process_size(kl->rb, KEYLOCK_FEED);
+    kl->rate = rate;
+    kl->primed = false;
+    return true;
 }
 
 double keylock_build(struct keylock *kl, signed short *pcm, unsigned samples,
                      double sample_dt, struct track *tr, double position,
                      double pitch, double start_vol, double end_vol)
 {
-    double step, hop, vol, gradient, advanced;
-    unsigned s;
+    double step, vol, gradient, advanced;
+    unsigned length, produced;
+
+    /* Paired with track.c's __ATOMIC_RELEASE store on tr->length - see that comment. */
+    length = __atomic_load_n(&tr->length, __ATOMIC_ACQUIRE);
+
+    if (samples > KEYLOCK_MAX_BLOCK || !ensure_stretcher(kl, tr->rate)) {
+        /* Nothing sensible to do but pass the audio through unstretched. */
+        memset(pcm, '\0', sizeof(*pcm) * KEYLOCK_CHANNELS * samples);
+        return sample_dt * pitch * samples;
+    }
 
     step = sample_dt * tr->rate;
-    hop = KEYLOCK_GRAIN * step * pitch;
 
     /*
      * Re-seat on anything that moved position other than our own playback: a seek, a loop wrap, a
-     * needle drop, a fresh track. Continuity is the whole basis of overlap-add, so carrying a tail
-     * across a jump would splice two unrelated parts of the track together.
+     * needle drop, a fresh track. A stretcher carries state across its window, so feeding it a
+     * discontinuity splices two unrelated parts of the track together.
      */
     if (!kl->primed || fabs(position - kl->expect) > KEYLOCK_RESEAT) {
         keylock_reset(kl);
         kl->read = position * tr->rate;
+        kl->primed = true;
     }
 
-    while (kl->fill < samples)
-        make_grain(kl, tr, step, hop);
+    /* Time ratio is output over input: playing FASTER means less output per input. */
+    rubberband_set_time_ratio(kl->rb, pitch != 0.0 ? 1.0 / fabs(pitch) : 1.0);
+
+    /* Feed until it can give us the block. Bounded so a pathological ratio cannot spin here. */
+    for (int guard = 0; rubberband_available(kl->rb) < (int)samples && guard < 64; guard++) {
+        unsigned want = rubberband_get_samples_required(kl->rb);
+
+        if (want == 0 || want > KEYLOCK_FEED)
+            want = KEYLOCK_FEED;
+
+        read_native(tr, kl->read, step, want, kl->in, length);
+        kl->read += want * step;
+        rubberband_process(kl->rb, (const float *const *)kl->in_ptr, want, 0);
+    }
+
+    produced = rubberband_retrieve(kl->rb, kl->out_ptr, samples);
 
     vol = start_vol;
     gradient = (end_vol - start_vol) / samples;
 
-    for (s = 0; s < samples; s++) {
-        int c;
-
-        for (c = 0; c < KEYLOCK_CHANNELS; c++)
-            *pcm++ = clamp(vol * kl->fifo[kl->head][c]);
-
-        kl->head = (kl->head + 1) % KEYLOCK_FIFO;
-        kl->fill--;
+    for (unsigned s = 0; s < samples; s++) {
+        for (int c = 0; c < KEYLOCK_CHANNELS; c++) {
+            /* Short of output only while priming; silence there beats repeating a stale block. */
+            double v = s < produced ? kl->out[c][s] * 32768.0 : 0.0;
+            *pcm++ = clamp(vol * v);
+        }
         vol += gradient;
     }
 

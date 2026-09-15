@@ -264,6 +264,7 @@ void player_clear(struct player *pl)
 {
     spin_clear(&pl->lock);
     track_release(pl->track);
+    keylock_clear(&pl->keylock);
 }
 
 /*
