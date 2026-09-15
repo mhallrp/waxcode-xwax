@@ -234,7 +234,7 @@ static void handle_status(struct control *ctrl)
         state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
         /* Precision fields (pitch/relative/cuePoint/loop) are read back live, not client-tracked,
          * so scrub/loop/cue stay in sync across a reconnect - see DEVLOG.md for the full history. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %.1f %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_cue_point_elapsed(&ctrl->deck->player),
@@ -243,6 +243,8 @@ static void handle_status(struct control *ctrl)
                      player_get_loop_end_elapsed(&ctrl->deck->player),
                      player_get_elapsed(&ctrl->deck->player),
                      ctrl->deck->player.timecode_valid ? 1 : 0,
+                     /* Seconds turning with an undecodable position - see player.h. */
+                     ctrl->deck->player.unreadable_seconds,
                      ctrl->deck->record->pathname);
     }
 

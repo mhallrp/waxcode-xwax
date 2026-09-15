@@ -25,7 +25,13 @@ void keylock_reset(struct keylock *kl)
 
 bool keylock_applicable(double pitch)
 {
-    return pitch >= 0.5 && pitch <= 2.0;
+    if (pitch < 0.5 || pitch > 2.0)
+        return false;
+
+    /* Near nominal there is nothing to correct, and correcting anyway comb-filters the output -
+     * see KEYLOCK_DEADBAND. player_collect() resets the grain engine on this path, so re-entering
+     * above the deadband starts from a clean tail rather than splicing onto a stale one. */
+    return fabs(pitch - 1.0) > KEYLOCK_DEADBAND;
 }
 
 static inline signed short clamp(double v)

@@ -77,6 +77,22 @@
 /* Seconds of unexplained position change that re-seats the grain engine - see keylock_build(). */
 #define KEYLOCK_RESEAT 0.01
 
+/*
+ * How far from nominal speed the platter must be before the grain engine is used at all.
+ *
+ * At 1.0 there is nothing to correct: tempo and pitch are already the recording's own, and the
+ * ideal read is simply contiguous. Running the engine anyway is not merely wasted work, it is
+ * ACTIVELY HARMFUL - the alignment search still displaces each grain by up to KEYLOCK_SEARCH
+ * samples, and the cross-fade then mixes that displaced audio against the previous grain's tail.
+ * Mixing a signal with a delayed copy of itself is a comb filter, which is why it was reported as
+ * sounding hollow, "like a tunnel", at 0.0 on the fader while being clean the moment key lock was
+ * switched off (owner-reported, 2026-09-15).
+ *
+ * 0.5% is 8.6 cents - inaudible as a pitch error, and far below any deliberate nudge. Inside it,
+ * plain varispeed is not an approximation of the right answer, it IS the right answer.
+ */
+#define KEYLOCK_DEADBAND 0.005
+
 struct keylock {
     bool primed;      /* a tail exists to cross-fade against */
     double read;      /* IDEAL source cursor for the next grain, advanced by exactly the hop */

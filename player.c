@@ -37,6 +37,9 @@
 
 #define SYNC_TIME (1.0 / 2) /* time taken to reach sync */
 #define SYNC_PITCH 0.05 /* don't sync at low pitches */
+/* Below this the platter is not really turning, and a position nobody is asking for is not a fault. */
+#define UNREADABLE_PITCH_FLOOR 0.05
+
 #define SYNC_RC 0.05 /* filter to 1.0 when no timecodes available */
 
 /* If the difference between our current position and that given by
@@ -229,6 +232,8 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->pitch = 0.0;
     pl->sync_pitch = 1.0;
     pl->volume = 0.0;
+
+    pl->unreadable_seconds = 0.0;
 
     pl->key_lock = false;
     keylock_init(&pl->keylock);
@@ -810,6 +815,21 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
          * avoid using outlier values from scratching for too long */
 
         pl->sync_pitch += dt / (SYNC_RC + dt) * (1.0 - pl->sync_pitch);
+    }
+
+    /*
+     * Count time spent turning without a decodable position - see player.h's own comment. Only in
+     * absolute mode: relative mode never consults position, so a side mismatch costs nothing there
+     * and warning about it would be noise.
+     *
+     * The pitch floor keeps a stationary needle out of it; a stopped record has no position to
+     * decode and nothing is wrong with that.
+     */
+    if (pl->timecode_control && !pl->relative_mode
+        && !pl->timecode_valid && fabs(pl->pitch) > UNREADABLE_PITCH_FLOOR) {
+        pl->unreadable_seconds += dt;
+    } else {
+        pl->unreadable_seconds = 0.0;
     }
 
     target_volume = fabs(pl->pitch) * VOLUME;

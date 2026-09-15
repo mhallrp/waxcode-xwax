@@ -60,6 +60,22 @@ struct player {
         relative_playing, /* relative mode's own play/pause state - true only from PLAY/PLAY_CUE, false from PAUSE/SEEK/GOTO_CUE/a fresh load. The needle modulates pitch while this is true (live scratch) but never starts or stops playback itself - lifting it doesn't pause, and dropping it back down doesn't resume. Owner's call, 2026-08-06: the vinyl is a controller for pitch/mixing, not a play/pause switch. */
         loop_active; /* [loop_start, loop_end) below - only consulted while relative_mode is also on */
 
+    /*
+     * Seconds spent with a turning platter whose POSITION will not decode.
+     *
+     * The timecoder reads speed off the control signal's sine carrier, but position off a
+     * side-specific code sequence - so a record whose side does not match `--timecode` gives a
+     * perfectly good pitch and no position at all. The deck then reports PLAYING with a real pitch
+     * and a moving playhead while player_collect() outputs silence, which reads as a dead output
+     * rather than as a misconfiguration (owner-reported, 2026-09-15: "I don't seem to be getting
+     * any output on deck B... vinyl control is working fine").
+     *
+     * A damaged or dirty record and an outright wrong timecode format look the same from here, and
+     * all three want the same message, so this counts the condition rather than naming a cause.
+     * Reset the moment a position decodes, so an ordinary needle drop never accumulates.
+     */
+    double unreadable_seconds;
+
     double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
     double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
