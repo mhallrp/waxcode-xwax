@@ -56,10 +56,25 @@
 #define SQ(x) ((x)*(x))
 #define TARGET_UNKNOWN INFINITY
 
-/* Below this pitch the deck is inaudible anyway (volume scales with |pitch|), so treating the
- * needle as stopped here costs nothing - including at a scratch's direction changes, which pass
- * through zero constantly. */
+/* Below this pitch the deck is inaudible anyway, volume scaling with |pitch|. */
 #define NEEDLE_STOPPED_PITCH 0.01
+
+/*
+ * How long the needle must stay below that before the deck gives up on knowing WHERE it is.
+ *
+ * Crossing zero costs nothing on the way past - the deck is silent there regardless. The cost is
+ * what follows: once position_known is false, player_collect() outputs silence until the timecoder
+ * decodes a fresh absolute position, and at low speed that takes real time. So every direction
+ * change bought a re-acquisition gap, during which the pitch was already climbing back into
+ * audibility while the deck stayed muted. Back-cueing a kick crosses zero on every pass, which is
+ * precisely where the transient being listened for lives (owner-reported, 2026-09-15: "sometimes I
+ * don't hear the kick as I scrub").
+ *
+ * A turnaround spends a few milliseconds down there; a lifted or stopped needle stays indefinitely.
+ * 120ms separates them comfortably, and still drops position quickly enough that a needle moved to
+ * a new spot cannot play a blip of the old one - the reason this guard exists at all.
+ */
+#define NEEDLE_STOPPED_SECONDS 0.12
 
 /*
  * Return: the cubic interpolation of the sample at position 2 + mu
@@ -234,6 +249,7 @@ void player_init(struct player *pl, unsigned int sample_rate,
     pl->volume = 0.0;
 
     pl->unreadable_seconds = 0.0;
+    pl->stopped_for = 0.0;
 
     pl->key_lock = false;
     keylock_init(&pl->keylock);
@@ -627,7 +643,7 @@ void player_clone(struct player *pl, const struct player *from)
  * Return: 0 on success or -1 if the timecoder is not currently valid
  */
 
-static int sync_to_timecode(struct player *pl)
+static int sync_to_timecode(struct player *pl, double dt)
 {
     double when, tcpos;
     signed int timecode;
@@ -676,12 +692,18 @@ static int sync_to_timecode(struct player *pl)
         /* Only once the needle has actually stopped do we give up on knowing where it is. An
          * undecodable patch mid-play is normal and playback coasts through it on pitch, which is
          * what the sync_pitch decay below exists for. */
-        if (fabs(pl->pitch) < NEEDLE_STOPPED_PITCH)
-            pl->position_known = false;
+        if (fabs(pl->pitch) < NEEDLE_STOPPED_PITCH) {
+            pl->stopped_for += dt;
+            if (pl->stopped_for >= NEEDLE_STOPPED_SECONDS)
+                pl->position_known = false;
+        } else {
+            pl->stopped_for = 0.0;
+        }
     } else {
         tcpos = (double)timecode / timecoder_get_resolution(pl->timecoder);
         pl->target_position = tcpos + pl->pitch * when;
         pl->position_known = true;
+        pl->stopped_for = 0.0;
     }
 
     return 0;
@@ -797,7 +819,7 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
         /* sync_to_timecode() no longer returns -1 for the runout - it handles that itself, without
          * disconnecting (see its own comment). Kept for any future failure that genuinely warrants
          * giving up on the needle, but nothing reaches it today. */
-        if (sync_to_timecode(pl) == -1)
+        if (sync_to_timecode(pl, dt) == -1)
             pl->timecode_control = false;
     }
 

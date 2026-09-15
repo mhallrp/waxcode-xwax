@@ -76,6 +76,9 @@ struct player {
      */
     double unreadable_seconds;
 
+    /* Seconds below NEEDLE_STOPPED_PITCH - see that constant for why this is timed, not instant. */
+    double stopped_for;
+
     double loop_start, loop_end; /* seconds, position-space, valid only while loop_active */
 
     double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
