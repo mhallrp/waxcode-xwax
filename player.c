@@ -56,6 +56,14 @@
 #define SQ(x) ((x)*(x))
 #define TARGET_UNKNOWN INFINITY
 
+/*
+ * Frames to cross-fade over when key lock engages or releases - 10ms at 48kHz.
+ *
+ * Long enough to turn a step into a slope the ear reads as continuous, short enough that the two
+ * sources cannot drift audibly apart within it.
+ */
+#define KEYLOCK_BLEND_FRAMES 480
+
 /* Below this pitch the deck is inaudible anyway, volume scaling with |pitch|. */
 #define NEEDLE_STOPPED_PITCH 0.01
 
@@ -886,18 +894,69 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
 
     if (position_unknown || !spin_try_lock(&pl->lock)) {
         r = build_silence(pcm, samples, pl->sample_dt, pitch);
-    } else if (pl->key_lock && keylock_applicable(&pl->keylock, pitch, dt) && pl->track->rate > 0) {
-        r = keylock_build(&pl->keylock, pcm, samples, pl->sample_dt, pl->track,
-                          pl->position - pl->offset, pitch,
-                          pl->volume, target_volume);
-        spin_unlock(&pl->lock);
     } else {
-        /* Scratching, reverse, stopped, or key lock simply off. Reset so that re-engaging starts
-         * from a clean tail instead of splicing onto whatever the last locked grain left behind. */
-        keylock_reset(&pl->keylock);
-        r = build_pcm(pcm, samples, pl->sample_dt, pl->track,
-                      pl->position - pl->offset, pitch,
-                      pl->volume, target_volume);
+        bool want = pl->key_lock && keylock_applicable(&pl->keylock, pitch, dt)
+            && pl->track->rate > 0;
+        double from = pl->position - pl->offset;
+        bool blending;
+
+        /* A change of source starts a cross-fade - see KEYLOCK_BLEND_FRAMES. */
+        if (want != pl->keylock_active) {
+            pl->keylock_active = want;
+            pl->keylock_blend = KEYLOCK_BLEND_FRAMES;
+        }
+        blending = pl->keylock_blend > 0 && samples <= PLAYER_BLEND_MAX;
+
+        /*
+         * Render the INCOMING source into pcm, and while a hand-over is in progress the OUTGOING
+         * one into a scratch buffer so the two can be mixed.
+         *
+         * The stretcher and plain varispeed sit at different points in the waveform, so swapping
+         * between them in one sample is a step discontinuity - the click heard when the fader
+         * crosses the engage threshold (owner-reported, 2026-09-15).
+         *
+         * Note the releasing case deliberately does NOT reset the stretcher until the fade is
+         * finished: it is still producing the audio being faded out.
+         */
+        if (want) {
+            r = keylock_build(&pl->keylock, pcm, samples, pl->sample_dt, pl->track,
+                              from, pitch, pl->volume, target_volume);
+            if (blending) {
+                build_pcm(pl->blend_pcm, samples, pl->sample_dt, pl->track,
+                          from, pitch, pl->volume, target_volume);
+            }
+        } else {
+            r = build_pcm(pcm, samples, pl->sample_dt, pl->track,
+                          from, pitch, pl->volume, target_volume);
+            if (blending && pl->keylock.primed) {
+                keylock_build(&pl->keylock, pl->blend_pcm, samples, pl->sample_dt, pl->track,
+                              from, pitch, pl->volume, target_volume);
+            } else {
+                blending = false;
+                /* Scratching, reverse, stopped, or key lock simply off - and the fade, if there
+                 * was one, is done. */
+                keylock_reset(&pl->keylock);
+            }
+        }
+
+        if (blending) {
+            unsigned int n = pl->keylock_blend < samples ? pl->keylock_blend : samples;
+            unsigned int i;
+
+            /* Equal-GAIN, not equal-power: these are two renderings of the same audio and are
+             * strongly correlated, so their sum is linear rather than power-law. */
+            for (i = 0; i < n; i++) {
+                double w = (double)(pl->keylock_blend - i) / KEYLOCK_BLEND_FRAMES;
+                int c;
+
+                for (c = 0; c < PLAYER_CHANNELS; c++) {
+                    unsigned int k = i * PLAYER_CHANNELS + c;
+                    pcm[k] = (signed short)(pcm[k] * (1.0 - w) + pl->blend_pcm[k] * w);
+                }
+            }
+            pl->keylock_blend -= n;
+        }
+
         spin_unlock(&pl->lock);
     }
 

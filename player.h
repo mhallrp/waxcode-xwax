@@ -28,6 +28,10 @@
 
 #define PLAYER_CHANNELS 2
 
+/* Largest block a hand-over cross-fade will cover; beyond it the fade is skipped rather than
+ * risking a buffer, which at these sizes cannot happen in practice. */
+#define PLAYER_BLEND_MAX 2048
+
 struct player {
     double sample_dt;
 
@@ -84,6 +88,23 @@ struct player {
     double cue_point; /* position-space; defaults to `offset` until SET_CUE is ever sent - see PROTOCOL.md */
 
     bool key_lock; /* hold the track's ORIGINAL pitch while the platter changes tempo - see keylock.h */
+
+    /*
+     * Cross-fade between the two audio sources when key lock engages or releases.
+     *
+     * The stretcher and plain varispeed are at different points in the waveform at the moment of
+     * handover, so switching between them instantaneously is a step discontinuity - audible as a
+     * click when the fader passes the engage threshold (owner-reported, 2026-09-15).
+     *
+     * `keylock_blend` counts DOWN in frames over KEYLOCK_BLEND_FRAMES; while it is non-zero both
+     * sources are rendered and mixed. It costs a few milliseconds of double work at each handover
+     * and nothing at all the rest of the time.
+     */
+    bool keylock_active;
+    unsigned int keylock_blend;
+    /* Scratch for the outgoing source during a hand-over. In the struct rather than on the stack -
+     * this is the realtime thread. */
+    signed short blend_pcm[PLAYER_BLEND_MAX * PLAYER_CHANNELS];
     struct keylock keylock;
 };
 
