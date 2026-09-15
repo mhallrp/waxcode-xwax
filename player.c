@@ -863,7 +863,7 @@ void player_collect(struct player *pl, signed short *pcm, unsigned samples)
 
     if (position_unknown || !spin_try_lock(&pl->lock)) {
         r = build_silence(pcm, samples, pl->sample_dt, pitch);
-    } else if (pl->key_lock && keylock_applicable(pitch) && pl->track->rate > 0) {
+    } else if (pl->key_lock && keylock_applicable(&pl->keylock, pitch, dt) && pl->track->rate > 0) {
         r = keylock_build(&pl->keylock, pcm, samples, pl->sample_dt, pl->track,
                           pl->position - pl->offset, pitch,
                           pl->volume, target_volume);

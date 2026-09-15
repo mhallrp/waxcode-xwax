@@ -16,6 +16,9 @@ void keylock_init(struct keylock *kl)
 
 void keylock_reset(struct keylock *kl)
 {
+    /* Steadiness deliberately NOT cleared here: this is called on every bypassed block, and
+     * zeroing it there would mean the timer could never accumulate and key lock could never
+     * engage at all. */
     /* No memset: `primed` false means the tail is never read, so clearing it would be busywork on
      * the realtime thread. This is called on every block that runs unlocked. */
     kl->primed = false;
@@ -23,15 +26,27 @@ void keylock_reset(struct keylock *kl)
     kl->head = 0;
 }
 
-bool keylock_applicable(double pitch)
+bool keylock_applicable(struct keylock *kl, double pitch, double dt)
 {
+    /* Steadiness is tracked whatever the speed, so a scrub that happens to pass through the
+     * working range does not arrive already looking settled. */
+    if (fabs(pitch - kl->last_pitch) > KEYLOCK_STEADY_TOLERANCE)
+        kl->steady_for = 0.0;
+    else
+        kl->steady_for += dt;
+    kl->last_pitch = pitch;
+
     if (pitch < 0.5 || pitch > 2.0)
         return false;
 
     /* Near nominal there is nothing to correct, and correcting anyway comb-filters the output -
      * see KEYLOCK_DEADBAND. player_collect() resets the grain engine on this path, so re-entering
      * above the deadband starts from a clean tail rather than splicing onto a stale one. */
-    return fabs(pitch - 1.0) > KEYLOCK_DEADBAND;
+    if (fabs(pitch - 1.0) <= KEYLOCK_DEADBAND)
+        return false;
+
+    /* Playback, not a scrub passing through - see KEYLOCK_STEADY_SECONDS. */
+    return kl->steady_for >= KEYLOCK_STEADY_SECONDS;
 }
 
 static inline signed short clamp(double v)

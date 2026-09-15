@@ -93,8 +93,26 @@
  */
 #define KEYLOCK_DEADBAND 0.005
 
+/*
+ * How steady the platter must be before key lock engages, and for how long.
+ *
+ * A speed WITHIN the working range is not the same as playback. Back-cueing sweeps the pitch
+ * through 0.5-2.0 continuously, which met the old test on its way past - so the grain engine
+ * engaged mid-scrub, and keylock_build() then re-seated on nearly every block because the platter
+ * kept moving differently from its prediction. Each re-seat discards the cross-fade tail, which
+ * costs exactly the short transient someone cueing a kick is listening for (owner-reported,
+ * 2026-09-15: "sometimes I don't hear the kick as I scrub").
+ *
+ * So it engages only once the speed has held still for a moment, and drops out the instant it
+ * stops holding. Real decks disable key lock while scratching for the same reason.
+ */
+#define KEYLOCK_STEADY_TOLERANCE 0.02
+#define KEYLOCK_STEADY_SECONDS 0.15
+
 struct keylock {
     bool primed;      /* a tail exists to cross-fade against */
+    double steady_for; /* seconds the speed has held still - see KEYLOCK_STEADY_SECONDS */
+    double last_pitch;
     double read;      /* IDEAL source cursor for the next grain, advanced by exactly the hop */
     double expect;    /* elapsed we expect to be handed next call, for jump detection */
     unsigned fill;    /* output samples ready in the fifo */
@@ -116,7 +134,14 @@ void keylock_reset(struct keylock *kl);
  * SOLA has no meaningful answer for a discontinuous, direction-changing position, and key-locked
  * scratching sounds wrong anyway - real decks drop it there too.
  */
-bool keylock_applicable(double pitch);
+/*
+ * Whether key lock should be engaged right now.
+ *
+ * Takes the whole state, not just the instantaneous pitch, because "is this playback or a scrub?"
+ * cannot be answered from one sample. `dt` is the block's duration, and this is what advances the
+ * steadiness timer, so it must be called once per block.
+ */
+bool keylock_applicable(struct keylock *kl, double pitch, double dt);
 
 /*
  * Mirrors build_pcm(): fills `samples` frames and returns seconds advanced in the source, so the
