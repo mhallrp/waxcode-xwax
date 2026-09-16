@@ -607,6 +607,18 @@ void player_set_track(struct player *pl, struct track *track)
     if (!pl->timecode_valid)
         pl->position = pl->offset;
 
+    /*
+     * The key lock cross-fade belongs to the track that is going away.
+     *
+     * Nothing else resets these - they are only ever written inside player_collect() - so a load
+     * landing mid-hand-over carried the old track's blend into the new one, mixing the first ~10ms
+     * of it against a second rendering of itself at a position from a track that is no longer
+     * loaded. Clearing the stretcher without clearing the fade that drives it left half a
+     * hand-over with nothing on the other side of it.
+     */
+    pl->keylock_active = false;
+    pl->keylock_blend = 0;
+
     spin_unlock(&pl->lock);
 
     /* A fresh load starts paused - no reason a newly loaded track should play itself, and this
