@@ -207,9 +207,18 @@ static void handle_status(struct control *ctrl)
          * stays LIVE, not fixed - relative mode can be armed before anything's loaded (a plain
          * field write, player_set_relative_mode() never touches the track), so a client selecting
          * it pre-load needs to be able to read that choice back. Same reasoning as IMPORTING's own
-         * live relative field below, see DEVLOG.md 2026-08-01. */
-        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000 0.000 0\n",
-                     ctrl->deck->player.relative_mode ? 1 : 0);
+         * live relative field below, see DEVLOG.md 2026-08-01.
+         *
+         * keyLock is live here for exactly that reason too, and unreadableSeconds is emitted in
+         * every variant so all three carry the SAME fields in the SAME order. That uniformity is
+         * not tidiness: the server matches these positionally with optional groups, so a field
+         * present in one shape and absent in another gets read as whichever field happens to sit
+         * in that slot - appending keyLock to a short EMPTY reply would have been parsed as
+         * unreadableSeconds. */
+        n = snprintf(reply, sizeof reply, "STATUS EMPTY 0.0 0.000 %d 0.000 0 0.000 0.000 0.000 0 %.1f %d\n",
+                     ctrl->deck->player.relative_mode ? 1 : 0,
+                     ctrl->deck->player.unreadable_seconds,
+                     ctrl->deck->player.key_lock ? 1 : 0);
     } else if (track_is_importing(ctrl->deck->player.track)) {
         /* timecodeValid is 0 here, and in EMPTY: nothing is locked to a needle in either state. A
          * client uses it to know whether anything OUTSIDE the app can move this deck at all.
@@ -223,9 +232,11 @@ static void handle_status(struct control *ctrl)
          * then - build_pcm() reads track->length live and just plays whatever has decoded so far.
          *
          * relative stays LIVE too, not fixed - see DEVLOG.md 2026-08-01 for the real bug otherwise. */
-        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %.4f 0 %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS IMPORTING 0.0 0.000 %d 0.000 0 0.000 0.000 %.4f 0 %.1f %d %s\n",
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_elapsed(&ctrl->deck->player),
+                     ctrl->deck->player.unreadable_seconds,
+                     ctrl->deck->player.key_lock ? 1 : 0,
                      ctrl->deck->record->pathname);
     } else {
         remain = player_get_remain(&ctrl->deck->player);
@@ -234,7 +245,7 @@ static void handle_status(struct control *ctrl)
         state = player_is_active(&ctrl->deck->player) ? "PLAYING" : "STOPPED";
         /* Precision fields (pitch/relative/cuePoint/loop) are read back live, not client-tracked,
          * so scrub/loop/cue stay in sync across a reconnect - see DEVLOG.md for the full history. */
-        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %.1f %s\n",
+        n = snprintf(reply, sizeof reply, "STATUS %s %.4f %.3f %d %.3f %d %.3f %.3f %.4f %d %.1f %d %s\n",
                      state, remain, ctrl->deck->player.pitch,
                      ctrl->deck->player.relative_mode ? 1 : 0,
                      player_get_cue_point_elapsed(&ctrl->deck->player),
@@ -245,6 +256,7 @@ static void handle_status(struct control *ctrl)
                      ctrl->deck->player.timecode_valid ? 1 : 0,
                      /* Seconds turning with an undecodable position - see player.h. */
                      ctrl->deck->player.unreadable_seconds,
+                     ctrl->deck->player.key_lock ? 1 : 0,
                      ctrl->deck->record->pathname);
     }
 
