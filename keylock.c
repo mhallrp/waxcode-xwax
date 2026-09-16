@@ -31,6 +31,7 @@ void keylock_init(struct keylock *kl)
         kl->in_ptr[c] = kl->in[c];
         kl->out_ptr[c] = kl->out[c];
     }
+    kl->last_ratio = 0.0;
 }
 
 void keylock_clear(struct keylock *kl)
@@ -53,6 +54,7 @@ void keylock_reset(struct keylock *kl)
         return;
 
     kl->primed = false;
+    kl->last_ratio = 0.0;
     if (kl->rb != NULL)
         rubberband_reset(kl->rb);
 }
@@ -183,8 +185,22 @@ double keylock_build(struct keylock *kl, signed short *pcm, unsigned samples,
         kl->primed = true;
     }
 
-    /* Time ratio is output over input: playing FASTER means less output per input. */
-    rubberband_set_time_ratio(kl->rb, pitch != 0.0 ? 1.0 / fabs(pitch) : 1.0);
+    /*
+     * Time ratio is output over input: playing FASTER means less output per input.
+     *
+     * Only pushed when it has actually moved - see KEYLOCK_RATIO_EPSILON. Setting it every block
+     * put reconfigure()/calculateSizes() on the realtime path, which is where this deck was found
+     * wedged on 2026-09-16.
+     */
+    {
+        double ratio = pitch != 0.0 ? 1.0 / fabs(pitch) : 1.0;
+
+        if (kl->last_ratio <= 0.0
+            || fabs(ratio - kl->last_ratio) > kl->last_ratio * KEYLOCK_RATIO_EPSILON) {
+            rubberband_set_time_ratio(kl->rb, ratio);
+            kl->last_ratio = ratio;
+        }
+    }
 
     /* Feed until it can give us the block. Bounded so a pathological ratio cannot spin here. */
     for (int guard = 0; rubberband_available(kl->rb) < (int)samples && guard < 64; guard++) {

@@ -80,6 +80,24 @@
 /* Seconds of unexplained position change that re-seats the engine - see keylock_build(). */
 #define KEYLOCK_RESEAT 0.01
 
+/*
+ * Don't hand Rubber Band a new time ratio for a change smaller than this.
+ *
+ * set_time_ratio() is cheap only when the ratio is unchanged. A changed one can send R2Stretcher
+ * into reconfigure() -> calculateSizes(), which recomputes window sizes and reallocates FFT plans -
+ * on the REALTIME thread, inside device_handle(). While it is in there the realtime loop never
+ * reaches controller_handle(), so the deck stops servicing its control socket entirely: it accepts
+ * commands and acts on none of them, while the process and its audio look healthy.
+ *
+ * That is the wedge captured on 2026-09-16, with the realtime thread stopped in exactly that call.
+ *
+ * The platter never holds a perfectly constant speed, so the ratio computed from live pitch moves
+ * every single block - which meant this was reachable on every block for the whole time key lock
+ * was engaged. 0.1% of ratio is far below anything audible as pitch, and it means the stretcher is
+ * only ever reconfigured when the DJ has genuinely moved the fader.
+ */
+#define KEYLOCK_RATIO_EPSILON 0.001
+
 struct keylock {
     RubberBandState rb;
     unsigned int rate;      /* what rb was built for; rebuilt if a track differs */
@@ -89,6 +107,7 @@ struct keylock {
     double expect;          /* elapsed we expect next call, for jump detection */
     double steady_for;      /* seconds the speed has held still */
     double last_pitch;
+    double last_ratio;      /* what the stretcher was last told - see KEYLOCK_RATIO_EPSILON */
 
     /* Scratch, in the struct rather than on the stack - this runs on the realtime thread. */
     float in[KEYLOCK_CHANNELS][KEYLOCK_FEED];
