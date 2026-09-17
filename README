@@ -1,3 +1,24 @@
+This is a MODIFIED version of xwax, forked for Waxcode DVS.
+============================================================
+
+Modified by Matt Hall, 2026. Upstream xwax is by Mark Hills and lives at
+http://xwax.org/ - this fork is not affiliated with or endorsed by it.
+
+Waxcode DVS runs xwax headless on a Raspberry Pi, driven over a control
+socket by a Node server and an iOS app. See https://www.waxcode.co/
+
+Changes from upstream include:
+
+  - a control socket for headless operation (control.c, PROTOCOL.md)
+  - key lock / master tempo via Rubber Band (keylock.c)
+  - inverse RIAA equalisation for phono-level output (riaa.c)
+  - cue point offsets, loop handling and playhead corrections
+  - an acquire/release barrier on track length, for ARM64
+
+Released under the GNU General Public License, version 3 - the same terms
+as upstream. See the COPYING file.
+
+
 xwax: Digital vinyl on Linux
 
 (C) Copyright 2026 Mark Hills <mark@xwax.org>
