@@ -42,6 +42,10 @@
 
 #define ZERO_THRESHOLD (128 << 16)
 
+/* Decay rate for the per-channel peak meters: halves roughly every 4096 samples (~85ms at 48kHz),
+ * so a meter reads like a meter rather than latching on one transient. */
+#define PEAK_DECAY_SHIFT 12
+
 #define ZERO_RC 0.001 /* time constant for zero/rumble filter */
 
 #define REF_PEAKS_AVG 48 /* in wave cycles */
@@ -322,9 +326,11 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
 
     tc->dt = 1.0 / sample_rate;
     tc->zero_alpha = tc->dt / (ZERO_RC + tc->dt);
-    tc->threshold = ZERO_THRESHOLD;
+    tc->base_threshold = ZERO_THRESHOLD;
     if (phono)
-        tc->threshold >>= 5; /* approx -36dB */
+        tc->base_threshold >>= 5; /* approx -36dB */
+    tc->sensitivity = 0;
+    tc->threshold = tc->base_threshold;
 
     tc->forwards = 1;
     init_channel(&tc->primary);
@@ -332,6 +338,8 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
     pitch_init(&tc->pitch, tc->dt);
 
     tc->ref_level = INT_MAX;
+    tc->peak_left = 0;
+    tc->peak_right = 0;
     tc->bitstream = 0;
     tc->timecode = 0;
     tc->valid_counter = 0;
@@ -341,8 +349,80 @@ void timecoder_init(struct timecoder *tc, struct timecode_def *def,
 }
 
 /*
+ * Set how much noise the decoder tolerates before it will read a wave at all
+ *
+ * Level 0 is the calibrated default. Each step doubles the threshold, so a booth with heavy
+ * low-end can be made to stop triggering on rumble at the cost of no longer reading the quietest
+ * part of the signal. Capped rather than open-ended: past this the threshold starts rejecting
+ * genuine timecode from a healthy cartridge.
+ *
+ * Written from the control thread while the audio thread reads it. A single aligned int on this
+ * platform, and a torn read is not possible - the worst case is one sample decided against the
+ * old value, which is indistinguishable from the change arriving a sample later.
+ */
+
+void timecoder_set_sensitivity(struct timecoder *tc, unsigned int level)
+{
+    if (level > TIMECODER_MAX_SENSITIVITY)
+        level = TIMECODER_MAX_SENSITIVITY;
+
+    tc->sensitivity = level;
+    tc->threshold = tc->base_threshold << level;
+}
+
+/*
  * Clear resources associated with a timecode decoder
  */
+
+/*
+ * Point an existing timecoder at a different timecode definition, in place.
+ *
+ * Why this exists: the definition is chosen at process start, so changing which side of the
+ * timecode record is on the platter meant restarting xwax@N - which empties the deck, loses the
+ * cue and the loop, and has to be undone by reloading everything afterwards. That restart was a
+ * source of real bugs and it is not needed: nothing about a definition swap requires a new process.
+ *
+ * REALTIME SAFETY. Safe to call from the realtime thread, and that is where it is called from:
+ *
+ *   - timecoder_init() allocates nothing. The lookup table belongs to the DEFINITION and is shared
+ *     between timecoders (see its own comment), so the def must already be built - the caller does
+ *     that off the realtime thread, which is the whole reason for the hand-off in control.c.
+ *   - Nothing is freed. timecoder_clear() frees only the scope, and that is carried across here
+ *     rather than dropped.
+ *
+ * What is deliberately NOT preserved is the decoded position. The needle is reading a different
+ * record now, so every sample decoded under the old definition describes somewhere this one has
+ * never been; the pitch and channel filters start clean and re-acquire, exactly as they do when a
+ * needle first lands.
+ */
+void timecoder_set_definition(struct timecoder *tc, struct timecode_def *def)
+{
+    double speed;
+    unsigned int rate, sensitivity;
+    bool phono;
+    void *scope;
+
+    assert(tc != NULL);
+    assert(def != NULL);
+    assert(def->lookup); /* built by the caller, off the realtime thread */
+
+    /* Everything here describes the DECK and its input, not the record on it, so it survives.
+     * Sensitivity especially: it is a setting somebody chose, and timecoder_init() zeroes it. */
+    speed = tc->speed;
+    /* Rounded without libm: tests/timecoder links lut.o and timecoder.o only, with no -lm, so a
+     * call to lround() here breaks that build and nothing else. */
+    rate = (unsigned int)(1.0 / tc->dt + 0.5);
+    phono = (tc->base_threshold != ZERO_THRESHOLD);
+    sensitivity = tc->sensitivity;
+    scope = tc->scope;
+
+    timecoder_init(tc, def, speed, rate, phono);
+
+    /* Through the setter rather than by repeating its arithmetic - there is one definition of how
+     * sensitivity maps to a threshold and this is not it. */
+    timecoder_set_sensitivity(tc, sensitivity);
+    tc->scope = scope;
+}
 
 void timecoder_clear(struct timecoder *tc)
 {
@@ -613,6 +693,21 @@ void timecoder_submit(struct timecoder *tc, signed short *pcm, size_t npcm)
             primary = right;
             secondary = left;
         }
+
+        /* Two compares and two shifts per sample, on the realtime path - negligible beside the
+         * filtering process_sample already does, and it is the only way to tell a user their left
+         * channel is dead rather than just "no signal". Decays over about 4000 samples so a meter
+         * built from it falls at a readable rate rather than latching. */
+
+        if (abs(left) > tc->peak_left)
+            tc->peak_left = abs(left);
+        else
+            tc->peak_left -= tc->peak_left >> PEAK_DECAY_SHIFT;
+
+        if (abs(right) > tc->peak_right)
+            tc->peak_right = abs(right);
+        else
+            tc->peak_right -= tc->peak_right >> PEAK_DECAY_SHIFT;
 
         process_sample(tc, primary, secondary);
         update_scope(tc, left, right);

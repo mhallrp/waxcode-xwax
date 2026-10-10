@@ -46,7 +46,7 @@ static const struct record no_record = {
 
 int deck_init(struct deck *d, struct rt *rt,
               struct timecode_def *timecode, const char *importer,
-              double speed, bool phono, bool protect)
+              double speed, bool phono, bool protect, double cue_offset)
 {
     unsigned int rate;
 
@@ -62,7 +62,7 @@ int deck_init(struct deck *d, struct rt *rt,
     rate = device_sample_rate(&d->device);
     assert(timecode != NULL);
     timecoder_init(&d->timecoder, timecode, speed, rate, phono);
-    player_init(&d->player, rate, track_acquire_empty(), &d->timecoder);
+    player_init(&d->player, rate, track_acquire_empty(), &d->timecoder, cue_offset);
     cues_reset(&d->cues);
 
     /* The timecoder and player are driven by requests from
@@ -106,6 +106,28 @@ void deck_load(struct deck *d, struct record *record)
 
     d->record = record;
     player_set_track(&d->player, t); /* passes reference */
+}
+
+/*
+ * Unload the current track from a deck, returning it to the same
+ * empty state deck_init() starts a deck in
+ * "Passthrough" section: turning passthrough on needs xwax to stop
+ * driving its own decoded audio to the DAC first, since a real vinyl
+ * passthrough loop (alsaloop, managed by Node - see
+ * server/src/passthrough.js) and xwax's own playback can't both write
+ * to the same output at once. Mirrors deck_load()'s own locked-deck
+ * guard - refusing to unload out from under an active, protected deck
+ * for the same reason deck_load() refuses to load one.
+ */
+void deck_unload(struct deck *d)
+{
+    if (deck_is_locked(d)) {
+        status_printf(STATUS_WARN, "Stop deck to unload");
+        return;
+    }
+
+    d->record = &no_record;
+    player_set_track(&d->player, track_acquire_empty());
 }
 
 void deck_recue(struct deck *d)

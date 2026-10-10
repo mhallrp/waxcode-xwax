@@ -42,6 +42,11 @@ struct timecode_def {
     struct lut lut;
 };
 
+/* Highest sensitivity step. Each step doubles the zero-crossing threshold, so this is the
+ * calibrated default shifted up three times - past that a healthy cartridge's own signal starts
+ * being rejected along with the rumble. */
+#define TIMECODER_MAX_SENSITIVITY 3
+
 struct timecoder_channel {
     bool positive, /* wave is in positive part of cycle */
         swapped; /* wave recently swapped polarity */
@@ -57,6 +62,11 @@ struct timecoder {
 
     double dt, zero_alpha;
     signed int threshold;
+    /* threshold at sensitivity 0, ie. after the phono shift but before any user adjustment -
+     * kept so raising and lowering sensitivity is always relative to the same starting point
+     * rather than compounding off the last value. */
+    signed int base_threshold;
+    unsigned int sensitivity;
 
     /* Pitch information */
 
@@ -72,6 +82,13 @@ struct timecoder {
     unsigned int valid_counter, /* number of successful error checks */
         timecode_ticker; /* samples since valid timecode was read */
 
+    /* Decaying peak per input channel, for the app's calibration display. Not used for decoding -
+     * ref_level below is what bit decisions compare against, and it self-calibrates. These exist so
+     * a user can be shown WHY a bad setup is failing: both low means a weak cartridge, one near
+     * zero means a dead channel or an unplugged lead. */
+
+    signed int peak_left, peak_right;
+
     /* Scope display */
 
     unsigned char *scope; /* x-y array */
@@ -80,10 +97,21 @@ struct timecoder {
 };
 
 struct timecode_def* timecoder_find_definition(const char *name);
+/* Raise the amplitude a wave must reach before it counts as a zero crossing at all. Trades
+ * responsiveness to a weak or quiet signal for immunity to rumble and vibration - the compromise
+ * a DJ makes knowingly in a demanding booth, which is why it is exposed rather than fixed. */
+
+void timecoder_set_sensitivity(struct timecoder *tc, unsigned int level);
+
 void timecoder_free_lookup(void);
 
 void timecoder_init(struct timecoder *tc, struct timecode_def *def,
                     double speed, unsigned int sample_rate, bool phono);
+/* Swap an existing timecoder onto a different definition in place, instead of restarting the
+ * process to pick a new one. Realtime-safe; `def` must already have its lookup table built, which
+ * is the caller's job and must happen off the realtime thread. See the full note in timecoder.c. */
+void timecoder_set_definition(struct timecoder *tc, struct timecode_def *def);
+
 void timecoder_clear(struct timecoder *tc);
 
 int timecoder_scope(struct timecoder *tc, unsigned short size);

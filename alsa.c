@@ -145,11 +145,20 @@ static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
         }
     }
 
-    /* Use the smallest period size for a latency-sensitive
-     * application that is the primary one on the system */
+    /* Pi DVS note: tried forcing a larger period (32 samples instead
+     * of the hardware's reported minimum of 8) on the theory that 8
+     * was too tight for the scheduling stack to service reliably.
+     * Measured on real hardware: this made xruns dramatically worse
+     * (469 in ~6s vs ~11-24 with the original period=8), the opposite
+     * of the prediction. Reverted - period_size_first() empirically
+     * performs better on this hardware, for a reason not yet
+     * understood. Left as a note rather than silently discarded,
+     * since the reasoning that led here still seems sound and the
+     * result contradicts it - worth real investigation later rather
+     * than trusting either intuition over the other. */
 
     r = snd_pcm_hw_params_set_period_size_first(pcm, hw, &frames, &dir);
-    CHECK("hw_params_set_buffer_time_near", r);
+    CHECK("hw_params_set_period_size_first", r);
 
     r = snd_pcm_hw_params(pcm, hw);
     CHECK("hw_params", r);
@@ -166,8 +175,10 @@ static bool set_hw(snd_pcm_t *pcm, snd_pcm_stream_t stream,
 
 static bool set_sw(snd_pcm_t *pcm)
 {
-    int r;
+    int r, dir;
     snd_pcm_sw_params_t *sw;
+    snd_pcm_hw_params_t *hw;
+    snd_pcm_uframes_t avail_min;
 
     snd_pcm_sw_params_alloca(&sw);
 
@@ -187,7 +198,26 @@ static bool set_sw(snd_pcm_t *pcm)
     r = snd_pcm_sw_params_set_start_threshold(pcm, sw, LONG_MAX);
     CHECK("sw_params_set_start_threshold", r);
 
-    r = snd_pcm_sw_params_set_avail_min(pcm, sw, 1);
+    /* Pi DVS fix: upstream used avail_min=1, waking the application
+     * the instant even a single frame of space is free - the most
+     * aggressive setting possible, leaving zero margin for any
+     * scheduling variance at all. Found on real hardware, alongside
+     * the period_size issue above: this Pi5 + HiFiBerry DAC8x
+     * combination produced frequent, clustered playback xruns with
+     * avail_min=1, audible as regular dropouts even after fixing
+     * period size and ruling out CPU/thermal/governor/IRQ causes.
+     * Use the actual negotiated period size instead - the kernel
+     * batches a full period's worth of work per wake-up rather than
+     * firing on every single available frame. Falls back to 1 (the
+     * original behaviour) if the period size can't be read, rather
+     * than silently using an uninitialised value. */
+
+    snd_pcm_hw_params_alloca(&hw);
+    avail_min = 1;
+    if (snd_pcm_hw_params_current(pcm, hw) >= 0)
+        snd_pcm_hw_params_get_period_size(hw, &avail_min, &dir);
+
+    r = snd_pcm_sw_params_set_avail_min(pcm, sw, avail_min);
     CHECK("sw_params_set_avail_min", r);
 
     r = snd_pcm_sw_params(pcm, sw);
@@ -327,13 +357,29 @@ static signed short *buffer(const snd_pcm_channel_area_t *area,
 static int playback(struct device *dv)
 {
     int r;
+    snd_pcm_sframes_t avail;
     snd_pcm_uframes_t frames, offset;
     const snd_pcm_channel_area_t *area;
     struct alsa *alsa = (struct alsa*)dv->local;
 
-    frames = snd_pcm_avail_update(alsa->playback.pcm);
-    if (frames < 0)
-        return (int)frames;
+    /* Pi DVS fix: snd_pcm_avail_update() returns a *signed* frame
+     * count, negative on error (eg. -EPIPE/-32 on an underrun). The
+     * original code assigned this directly into the *unsigned*
+     * `frames`, so a negative error code silently became a huge
+     * positive number and "if (frames < 0)" could never be true for
+     * an unsigned type - the error-handling code right there was
+     * unreachable. Found by actually running against real hardware:
+     * this HAT's timing produced an underrun almost immediately,
+     * which then went undetected forever, leaving playback stuck
+     * with a "successfully started" stream that never actually
+     * advanced again. Checking a properly signed variable first
+     * lets the existing xrun-recovery path in handle() work as
+     * originally intended. */
+
+    avail = snd_pcm_avail_update(alsa->playback.pcm);
+    if (avail < 0)
+        return (int)avail;
+    frames = (snd_pcm_uframes_t)avail;
 
     r = snd_pcm_mmap_begin(alsa->playback.pcm, &area, &offset, &frames);
     if (r < 0)
@@ -369,13 +415,19 @@ static int playback(struct device *dv)
 static int capture(struct device *dv)
 {
     int r;
+    snd_pcm_sframes_t avail;
     snd_pcm_uframes_t frames, offset;
     const snd_pcm_channel_area_t *area;
     struct alsa *alsa = (struct alsa*)dv->local;
 
-    frames = snd_pcm_avail(alsa->capture.pcm);
-    if (frames < 0)
-        return (int)frames;
+    /* Pi DVS fix: same signed/unsigned bug as playback() above - see
+     * the comment there. Hasn't been observed to bite here yet, but
+     * it's the identical latent bug, fixed for the same reason. */
+
+    avail = snd_pcm_avail(alsa->capture.pcm);
+    if (avail < 0)
+        return (int)avail;
+    frames = (snd_pcm_uframes_t)avail;
 
     r = snd_pcm_mmap_begin(alsa->capture.pcm, &area, &offset, &frames);
     if (r < 0)
@@ -518,8 +570,19 @@ int alsa_init(struct device *dv, const char *name,
     alsa->buffer = buffer;
     alsa->written = 0;
 
+    /* Pi DVS fix: upstream always opened capture with buffer=0
+     * ("device maximum"), ignoring --buffer entirely for this side -
+     * only playback ever got the requested size. On this hardware
+     * the resulting default capture buffer was large enough that the
+     * timecoder was working from stale data, causing it to lose
+     * bitstream lock for whole seconds at a time in a repeating
+     * cycle (audible as periodic screeching/dropout with a hard
+     * position correction at the end of each cycle). Giving capture
+     * the same explicit, small buffer as playback fixed it - found
+     * by testing this in isolation on real hardware, confirmed
+     * clean by ear at buffer=256. */
     if (flow_open(&alsa->capture, name, SND_PCM_STREAM_CAPTURE,
-                 rate, 0) < 0)
+                 rate, buffer) < 0)
     {
         fputs("Failed to open device for capture.\n", stderr);
         goto fail;

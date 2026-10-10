@@ -45,9 +45,25 @@ CFLAGS += -Wall
 CPPFLAGS += -MMD -MP
 LDFLAGS ?= -O3
 
+# Key lock's time-stretching - see keylock.h for why this is a library rather than our own.
+CFLAGS += $(shell pkg-config --cflags rubberband)
+LDLIBS += $(shell pkg-config --libs rubberband)
+
+# keylock-rb.cpp is the ONLY C++ here, and exists solely to catch what Rubber Band throws - an
+# uncaught exception in a C program aborts the whole deck. See keylock-rb.cpp.
+#
+# -lstdc++ explicitly: librubberband.so already drags the runtime in, but OUR unwinding tables need
+# it at link time, and relying on a transitive dependency for that is how a build breaks on a box
+# nobody can log in to.
+CXXFLAGS ?= -O3
+CXXFLAGS += -Wall
+CXXFLAGS += $(shell pkg-config --cflags rubberband)
+LDLIBS += -lstdc++
+
 # Core objects and libraries
 
-OBJS = controller.o \
+OBJS = control.o \
+	controller.o \
 	cues.o \
 	deck.o \
 	device.o \
@@ -55,6 +71,9 @@ OBJS = controller.o \
 	excrate.o \
 	external.o \
 	index.o \
+	keylock.o \
+	keylock-rb.o \
+	riaa.o \
 	interface.o \
 	library.o \
 	listbox.o \
@@ -75,6 +94,7 @@ TESTS = tests/cues \
 	tests/external \
 	tests/library \
 	tests/observer \
+	tests/riaa \
 	tests/status \
 	tests/timecoder \
 	tests/track \
@@ -120,6 +140,12 @@ VERSION = $(shell ./mkversion)
 xwax:		$(OBJS)
 xwax:		LDLIBS += $(SDL_LIBS) $(DEVICE_LIBS) -lm
 xwax:		LDFLAGS += -pthread
+
+# Spelled out rather than left to an implicit rule: Make 3.81 resolves this to keylock-rb.c and
+# stops, and field boxes COMPILE xwax themselves unattended - a build that depends on which make a
+# box happens to have is a build that fails where nobody can see it. Same reason as tests/ttf.o.
+keylock-rb.o:	keylock-rb.cpp keylock-rb.h
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 interface.o:	CFLAGS += $(SDL_CFLAGS)
 
@@ -171,6 +197,9 @@ tests/library:	LDFLAGS += -pthread
 
 tests/midi:	tests/midi.o midi.o
 tests/midi:	LDLIBS += $(ALSA_LIBS)
+
+tests/riaa:	tests/riaa.o riaa.o
+tests/riaa:	LDLIBS += -lm
 
 tests/observer:	tests/observer.o
 

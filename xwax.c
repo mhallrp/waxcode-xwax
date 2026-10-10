@@ -26,6 +26,7 @@
 #include <sys/mman.h> /* mlockall() */
 
 #include "alsa.h"
+#include "control.h"
 #include "controller.h"
 #include "device.h"
 #include "dicer.h"
@@ -55,7 +56,8 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
 
 char *banner = "xwax " VERSION \
-    " (C) Copyright 2026 Mark Hills <mark@xwax.org>";
+    " (C) Copyright 2026 Mark Hills <mark@xwax.org>" \
+    ", modified for Waxcode 2026 by Matt Hall <info@waxcode.co>";
 
 size_t ndeck;
 struct deck deck[3];
@@ -67,8 +69,10 @@ static struct rt rt;
 
 static double speed;
 static bool protect, phono;
+static double phono_out_db;  /* 0 = off; otherwise dB of attenuation applied with inverse RIAA */
 static const char *importer;
 static struct timecode_def *timecode;
+static double cue_offset; /* Pi DVS: see --cue-offset and player.c's cue_offset param */
 
 static void usage(FILE *fd)
 {
@@ -79,6 +83,7 @@ static void usage(FILE *fd)
       "  --rtprio <n>        Real-time priority (0 for no priority, default %d)\n"
       "  --geometry <s>      Set display geometry (see man page)\n"
       "  --no-decor          Request a window with no decorations\n"
+      "  --no-interface      Run headless: no SDL window, no drawing\n"
       "  -h, --help          Display this message to stdout and exit\n\n",
       DEFAULT_PRIORITY);
 
@@ -89,11 +94,14 @@ static void usage(FILE *fd)
 
     fprintf(fd, "Deck options:\n"
       "  --timecode <name>   Timecode name\n"
+      "  --cue-offset <s>    Fixed calibration offset in seconds,\n"
+      "                      applied to every needle-drop position (default 0)\n"
       "  --33                Use timecode at 33.3RPM (default)\n"
       "  --45                Use timecode at 45RPM\n"
       "  --[no-]protect      Protect against certain operations while playing\n"
       "  --line              Line level signal (default)\n"
       "  --phono             Tolerate cartridge level signal ('software pre-amp')\n"
+      "  --phono-out <dB>    Emit cartridge level, inverse RIAA, for a mixer's phono input\n"
       "  --import <program>  Track importer (default '%s')\n"
       "  --dummy             Build a dummy deck with no audio device\n\n",
       DEFAULT_IMPORTER);
@@ -119,6 +127,9 @@ static void usage(FILE *fd)
     fprintf(fd, "JACK device options:\n"
       "  --jack <name>       Create a JACK deck with the given name\n\n");
 #endif
+
+    fprintf(fd, "Remote control:\n"
+      "  --socket <path>     Unix socket for headless control - see PROTOCOL.md\n\n");
 
 #ifdef WITH_ALSA
     fprintf(fd, "MIDI control:\n"
@@ -174,7 +185,7 @@ static int commit_deck(void)
 
     d = &deck[ndeck];
 
-    r = deck_init(d, &rt, timecode, importer, speed, phono, protect);
+    r = deck_init(d, &rt, timecode, importer, speed, phono, protect, cue_offset);
     if (r == -1)
         return -1;
 
@@ -193,7 +204,7 @@ int main(int argc, const char *argv[])
     int rc = -1, n, priority;
     const char *scanner, *geo;
     char *endptr;
-    bool use_mlock, decor;
+    bool use_mlock, decor, interface;
 
     struct library library;
 
@@ -237,6 +248,7 @@ int main(int argc, const char *argv[])
     ndeck = 0;
     geo = "";
     decor = true;
+    interface = true;
     nctl = 0;
     priority = DEFAULT_PRIORITY;
     importer = DEFAULT_IMPORTER;
@@ -245,6 +257,8 @@ int main(int argc, const char *argv[])
     speed = 1.0;
     protect = false;
     phono = false;
+    phono_out_db = 0.0;
+    cue_offset = 0.0;
     use_mlock = false;
 
 #if defined WITH_OSS || WITH_ALSA
@@ -435,6 +449,10 @@ int main(int argc, const char *argv[])
             if (r == -1)
                 return -1;
 
+            /* After the device is up, because until then the sample rate may still be
+             * 'automatic' and the filter's coefficients depend on it. */
+            riaa_init(&device->riaa, device_sample_rate(device), phono_out_db);
+
             commit_deck();
 
             argv += 2;
@@ -471,6 +489,30 @@ int main(int argc, const char *argv[])
 
             argv += 2;
             argc -= 2;
+
+        } else if (!strcmp(argv[0], "--cue-offset")) {
+
+            /* Pi DVS: fixed calibration constant, seconds - see
+             * player.c's cue_offset param. Must precede --alsa/--oss/
+             * --jack on the command line, same as --timecode/--buffer/
+             * --socket above - commit_deck() (called when the device
+             * flag is parsed) reads this global at that moment, not
+             * after all arguments finish parsing. */
+
+            if (argc < 2) {
+                fprintf(stderr, "%s requires a number of seconds as an argument.\n", argv[0]);
+                return -1;
+            }
+
+            cue_offset = strtod(argv[1], &endptr);
+            if (*endptr != '\0') {
+                fprintf(stderr, "%s requires a number of seconds as an argument.\n", argv[0]);
+                return -1;
+            }
+
+            argv += 2;
+            argc -= 2;
+
 
         } else if (!strcmp(argv[0], "--33")) {
 
@@ -510,6 +552,35 @@ int main(int argc, const char *argv[])
         } else if (!strcmp(argv[0], "--phono")) {
 
             phono = true;
+
+            argv++;
+            argc--;
+
+        } else if (!strcmp(argv[0], "--phono-out")) {
+
+            /* Pre-emphasise and attenuate the output so a mixer's phono stage undoes both,
+             * exactly as it would for a real record. The argument is how far to attenuate;
+             * roughly 50dB takes a full-scale track down to cartridge level. */
+
+            char *endptr;
+
+            if (argc < 2) {
+                fprintf(stderr, "%s requires a level in dB as an argument.\n", argv[0]);
+                return -1;
+            }
+
+            phono_out_db = strtod(argv[1], &endptr);
+            if (*endptr != '\0' || phono_out_db < 0.0) {
+                fprintf(stderr, "'%s' is not a valid attenuation in dB.\n", argv[1]);
+                return -1;
+            }
+
+            argv += 2;
+            argc -= 2;
+
+        } else if (!strcmp(argv[0], "--no-phono-out")) {
+
+            phono_out_db = 0.0;
 
             argv++;
             argc--;
@@ -563,6 +634,13 @@ int main(int argc, const char *argv[])
             argv++;
             argc--;
 
+        } else if (!strcmp(argv[0], "--no-interface")) {
+
+            interface = false;
+
+            argv++;
+            argc--;
+
         } else if (!strcmp(argv[0], "--import")) {
 
             /* Importer script for subsequent decks */
@@ -604,6 +682,35 @@ int main(int argc, const char *argv[])
 
             if (library_import(&library, scanner, argv[1]) == -1)
                 return -1;
+
+            argv += 2;
+            argc -= 2;
+
+        } else if (!strcmp(argv[0], "--socket")) {
+
+            /* Pi DVS control socket - see control.h. Not gated behind
+             * WITH_ALSA, since a Unix socket needs no audio library
+             * at all - unlike --dicer below, which needs ALSA's
+             * rawmidi API. */
+
+            struct controller *c;
+
+            if (nctl == ARRAY_SIZE(ctl)) {
+                fprintf(stderr, "Too many controllers; aborting.\n");
+                return -1;
+            }
+
+            c = &ctl[nctl];
+
+            if (argc < 2) {
+                fprintf(stderr, "--socket requires a path as an argument.\n");
+                return -1;
+            }
+
+            if (control_init(c, &rt, argv[1]) == -1)
+                return -1;
+
+            nctl++;
 
             argv += 2;
             argc -= 2;
@@ -677,7 +784,24 @@ int main(int argc, const char *argv[])
         goto out_rt;
     }
 
-    if (interface_start(&library, geo, decor) == -1)
+    /*
+     * Headless: skip SDL entirely.
+     *
+     * On a box with no screen the interface is pure cost. Measured on the shipping hardware with
+     * NOTHING loaded or playing: 17% and 22% of a core for the two decks, drawing a 1280x960
+     * window to SDL's dummy driver that nobody will ever see.
+     *
+     * Worse than wasteful, it is in the way. interface.c's event loop holds the RIG LOCK across
+     * every draw(), and rig_main() must take that same lock to service the control socket - so
+     * while a deck is drawing, it is not calling accept(). With BACKLOG at 1 that made connects
+     * fail outright with EAGAIN: on 2026-09-02, the first time both decks ran at once, LOAD never
+     * reached xwax and the deck looked dead while the process was perfectly healthy.
+     *
+     * rig has no functional dependency on the interface - its own comment says it "does very little
+     * on its behalf" - so skipping it leaves the rig lock uncontended rather than merely less
+     * contended. It also removes the SDL threads, which appeared in the 2026-09-01 SIGSEGV too.
+     */
+    if (interface && interface_start(&library, geo, decor) == -1)
         goto out_rt;
 
     for (n = 0; n < ndeck; n++) {
@@ -696,7 +820,8 @@ int main(int argc, const char *argv[])
     fprintf(stderr, "Exiting cleanly...\n");
 
 out_interface:
-    interface_stop();
+    if (interface)
+        interface_stop();
 out_rt:
     rt_stop(&rt);
 

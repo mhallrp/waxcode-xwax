@@ -1,0 +1,34 @@
+Measuring key lock quality
+==========================
+
+Two harnesses that between them characterise the trade R3 and R2+Crisp sit on either side of. Both
+were written on 2026-10-08, after weeks of choosing options by ear produced a configuration
+(TransientsSmooth) that was the worst available on every axis.
+
+Any change to KEYLOCK_OPTIONS should have to beat the table in keylock.c on these, not an impression.
+
+attack.c   Transient smearing, on REAL music. Attack time is 10%-90% of the onset envelope, averaged
+           over every detected hit. Also reports pre-echo, which is the artefact an ear hears as mud
+           and which attack time alone misses.
+
+           A synthetic kick is NOT good enough: it showed 0.1ms of smearing where real polyphonic
+           material showed 9ms. Dense music is where a vocoder struggles. Always feed it a track.
+
+               gcc -O2 -o attack attack.c -lrubberband -lstdc++ -lm
+               ffmpeg -v error -ss 60 -t 40 -i TRACK.mp3 -f f32le -ac 1 -ar 48000 - | ./attack 1.08
+
+wobble.c   Warble, as PITCH instability in cents on a sustained tone - which is what the word means
+           to an ear. Quadrature demodulation against the frequency the output should hold.
+
+           THE ACCEPTANCE TEST IS THE DRY ROW: it must read a few cents, not more. The first version
+           measured its own rounding error and reported 113 cents on a clean tone, because it took a
+           phase difference per SAMPLE and multiplied the noise by RATE/2pi. If dry is large, the
+           harness is broken, not the stretcher.
+
+               gcc -O2 -o wobble wobble.c -lrubberband -lstdc++ -lm
+               ./wobble 1.08     (and 0.92 - the two engines rank differently either side of zero)
+
+WHAT DID NOT WORK, so nobody rebuilds it: measuring warble as amplitude modulation ranked the
+configurations in an order that contradicted the owner's ears, because amplitude wobble is not what
+warble is. And measuring spectral movement frame-to-frame on real music does not discriminate at all -
+natural movement is 8-9 dB per frame and swamps anything the stretcher adds.

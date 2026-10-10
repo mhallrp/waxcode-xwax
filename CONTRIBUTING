@@ -1,2 +1,12 @@
-The author monitors the xwax mailing list as the primary channel for
-suggesting bug reports, patches and forks: https://xwax.org/contact.html
+This is the Waxcode fork of xwax. Report anything about THIS fork - the control
+socket, key lock, phono output, cue offsets, the ARM64 fixes, or anything else
+listed in the README - at:
+
+  https://github.com/mhallrp/waxcode-xwax
+
+Please do not send fork issues to upstream xwax; Mark Hills maintains the
+original and did not write these changes.
+
+For upstream xwax itself, the author monitors the xwax mailing list as the
+primary channel for bug reports, patches and forks:
+https://xwax.org/contact.html

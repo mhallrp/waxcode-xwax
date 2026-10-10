@@ -53,12 +53,13 @@ struct deck {
 
 int deck_init(struct deck *deck, struct rt *rt,
               struct timecode_def *timecode, const char *importer,
-              double speed, bool phono, bool protect);
+              double speed, bool phono, bool protect, double cue_offset);
 void deck_clear(struct deck *deck);
 
 bool deck_is_locked(const struct deck *deck);
 
 void deck_load(struct deck *deck, struct record *record);
+void deck_unload(struct deck *deck);
 
 void deck_recue(struct deck *deck);
 void deck_clone(struct deck *deck, const struct deck *from);

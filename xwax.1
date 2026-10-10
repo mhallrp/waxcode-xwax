@@ -315,7 +315,30 @@ Use a high resolution and enlarge the user interface:
 .RS
 xwax \-\-geometry 1920x1200/1.8 \-\-alsa hw:0
 .RE
+.SH WAXCODE ADDITIONS
+This is a modified xwax. These options do not exist upstream:
+.TP
+.BI \-\-socket \ path
+Serve a Unix-socket control protocol at
+.I path
+and run headless. The protocol - LOAD, STATUS, SIGNAL, transport, loops, cue
+points, key lock - is documented in PROTOCOL.md.
+.TP
+.BI \-\-cue\-offset \ seconds
+A fixed calibration offset applied to every needle-drop position.
+.TP
+.BI \-\-phono\-out \ dB
+Emit cartridge level with an inverse RIAA curve, for a mixer's phono input.
+.B \-\-no\-phono\-out
+restores line level.
+.P
+Key lock (master tempo) is available over the control socket rather than as a
+command-line option.
 .SH HOMEPAGE
-http://xwax.org/
+This fork: https://github.com/mhallrp/waxcode-xwax
+.br
+Upstream xwax: http://xwax.org/
 .SH AUTHOR
-Mark Hills <mark@xwax.org>
+Mark Hills <mark@xwax.org> wrote xwax.
+.br
+The Waxcode modifications are by Matt Hall <info@waxcode.co>.

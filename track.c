@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h> /* strcmp() */
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/mman.h> /* mlock() */
@@ -186,10 +187,11 @@ static void commit_pcm_samples(struct track *tr, unsigned int samples)
         pcm += TRACK_CHANNELS;
     }
 
-    /* Increment the track length. A memory barrier ensures the
-     * realtime or UI thread does not access garbage audio */
+    /* __ATOMIC_RELEASE so more_space()'s block pointer write is visible to any
+     * reader that observes the new length - readers must use __ATOMIC_ACQUIRE,
+     * not a plain read (ARM64 has no implicit ordering here).. */
 
-    __sync_fetch_and_add(&tr->length, samples);
+    __atomic_fetch_add(&tr->length, samples, __ATOMIC_RELEASE);
 }
 
 /*
@@ -278,8 +280,16 @@ static struct track* track_get_again(const char *importer, const char *path)
 {
     struct track *t;
 
+    /* importer is safe to compare by pointer (deck.c sets d->importer once at deck_init() and it
+     * never changes for the process lifetime), but path is NOT - control.c's handle_load() does a
+     * fresh strdup() on every LOAD command, so two loads of the identical file get two genuinely
+     * different allocations. Comparing path by pointer here meant this function could never find a
+     * real match on identical content, AND - once a track's memory was freed and later reused by
+     * malloc() for something else - could wrongly report a match against unrelated, freed memory.
+     * Caused a real, reproducible xwax segfault reloading a track after a different one had played
+     * in between.. */
     list_for_each(t, &tracks, tracks) {
-        if (t->importer == importer && t->path == path) {
+        if (t->importer == importer && strcmp(t->path, path) == 0) {
             track_acquire(t);
             return t;
         }
@@ -324,15 +334,35 @@ struct track* track_acquire_by_import(const char *importer, const char *path)
  * Return: pointer, not NULL
  */
 
+/*
+ * The reference count is touched from several threads at once and is NOT protected by any shared
+ * lock - rig_post_track() acquires, player_set_track() and the worker release, and rig_lock() is
+ * only ever taken by interface.c. A plain `refcount++` / `refcount--` is a read-modify-write, so on
+ * ARM64 two of them racing silently lose one update.
+ *
+ * A lost decrement leaks a track, which is harmless. A lost INCREMENT is not: the count reaches
+ * zero while a reference is still held, the track is freed early, and the heap is corrupted. The
+ * crash that follows lands wherever the allocator next touches the damaged arena - which is exactly
+ * the shape of the 2026-09-01 SIGSEGV, dying inside free() -> __default_morecore() -> brk() under
+ * track_release() on the worker thread, with a track load in flight at that moment.
+ *
+ * The standard refcount ordering: RELAXED on acquire, because you must already hold a reference to
+ * take another, and ACQ_REL on release so the thread that drops the last one sees every write the
+ * others made before letting go. Builtins rather than _Atomic so the type, the struct layout and
+ * `empty`'s static initialiser all stay exactly as they were.
+ *
+ * Same family as the tr->length race, whose own note said it could recur
+ * elsewhere in xwax. It did.
+ */
 struct track* track_acquire_empty(void)
 {
-    empty.refcount++;
+    __atomic_add_fetch(&empty.refcount, 1, __ATOMIC_RELAXED);
     return &empty;
 }
 
 void track_acquire(struct track *t)
 {
-    t->refcount++;
+    __atomic_add_fetch(&t->refcount, 1, __ATOMIC_RELAXED);
 }
 
 /*
@@ -355,17 +385,20 @@ static void terminate(struct track *t)
 
 void track_release(struct track *t)
 {
-    t->refcount--;
+    /* The RESULT of our own decrement, not a re-read of the field - see track_acquire's comment.
+     * Re-reading is a second race all by itself: another thread can change it in between, and two
+     * threads can then both see zero and both free. */
+    unsigned int remaining = __atomic_sub_fetch(&t->refcount, 1, __ATOMIC_ACQ_REL);
 
     /* When importing, a reference is held. If it's the
      * only one remaining terminate it to save resources */
 
-    if (t->refcount == 1 && t->pid != 0) {
+    if (remaining == 1 && t->pid != 0) {
         terminate(t);
         return;
     }
 
-    if (t->refcount == 0) {
+    if (remaining == 0) {
         assert(t != &empty);
         track_clear(t);
         free(t);
