@@ -22,11 +22,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+
 #include "controller.h"
 #include "debug.h"
 #include "device.h"
 #include "realtime.h"
 #include "thread.h"
+/* See the poll() call in rt_main() for why this is bounded rather than -1. 10ms is short enough
+ * that a control command never waits noticeably, long enough to be free on an idle deck. */
+#define REALTIME_POLL_TIMEOUT_MS 10
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
 
@@ -83,7 +87,32 @@ static void rt_main(struct rt *rt)
         abort(); /* under our control; see sem_post(3) */
 
     while (!rt->finished) {
-        r = poll(rt->pt, rt->npt, -1);
+        /*
+         * A bounded wait, not -1.
+         *
+         * Upstream blocks indefinitely because everything it polls is genuinely event-driven. This
+         * fork added a control socket, and that assumption no longer holds: controller_pollfds() is
+         * collected ONCE, in rt_add_controller(), when control.c's pollfds() has no client yet and
+         * so registers only its listening socket. A connected client's fd is therefore never in
+         * this set, and commands from it are read only because some OTHER fd - in practice the
+         * ALSA device, while audio is flowing - happens to wake this loop and controller_handle()
+         * runs read_client() anyway.
+         *
+         * That works right up until a deck goes silent. With no audio wakeups, a new connection
+         * still arrives on the listening socket (so accept() succeeds and the backlog drains) but
+         * the command written after it is never read. The deck accepts everything and acts on
+         * nothing, while its process and audio thread look perfectly healthy - which is exactly
+         * what was seen on 2026-09-16, on a deck that had already stopped playing.
+         *
+         * A timeout makes the control socket serviced at a guaranteed minimum rate no matter what
+         * the audio is doing. Costs 100 wakeups a second on a fully idle deck, and nothing at all
+         * while audio is flowing, since the device wakes this far more often than this anyway.
+         *
+         * The tidier fix is to put client_fd in the poll set, which needs it rebuilt whenever a
+         * client connects or drops - a larger change to a structure upstream owns. This makes the
+         * failure impossible either way.
+         */
+        r = poll(rt->pt, rt->npt, REALTIME_POLL_TIMEOUT_MS);
         if (r == -1) {
             if (errno == EINTR) {
                 continue;

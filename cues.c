@@ -31,9 +31,7 @@ void cues_reset(struct cues *q)
         q->position[n] = CUE_UNSET;
 }
 
-/*
- * Unset the given cue point
- */
+/** Unset the given cue point */
 
 void cues_unset(struct cues *q, unsigned int label)
 {
@@ -54,9 +52,7 @@ double cues_get(const struct cues *q, unsigned int label)
     return q->position[label];
 }
 
-/*
- * Return: the previous cue point before the current position, or CUE_UNSET
- */
+/** Return: the previous cue point before the current position, or CUE_UNSET */
 
 double cues_prev(const struct cues *q, double current)
 {
@@ -79,9 +75,7 @@ double cues_prev(const struct cues *q, double current)
     return r;
 }
 
-/*
- * Return: the next cue point after the given position, or CUE_UNSET
- */
+/** Return: the next cue point after the given position, or CUE_UNSET */
 
 double cues_next(const struct cues *q, double current)
 {
